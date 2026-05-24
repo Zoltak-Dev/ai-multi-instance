@@ -53,6 +53,20 @@ It works by registering this tool as the `claude://` handler in `HKCU\Software\M
 
 The patch is a registry entry, so it stays active after you close the menu.
 
+## Build
+
+Standalone `.exe` build via PyInstaller, for shipping to users who don't have Python:
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --console   --name claude-multi-instance --clean --noconfirm main.py
+pyinstaller --onefile --noconsole --name launcher              --clean --noconfirm launcher.pyw
+```
+
+The two binaries land in `dist/`. Ship them in the same folder — `claude-multi-instance.exe` looks for `launcher.exe` next to itself to wire up desktop shortcuts and the `claude://` handler. State (profiles, `.active_profile`) also lives next to the exe.
+
+Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/claude-multi-instance/releases).
+
 ## License
 
 MIT

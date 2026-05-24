@@ -15,9 +15,20 @@ from pathlib import Path
 import _userchoice as uc
 
 PUBLISHER_HASH = "pzs8sxrjxfjjc"
-PROJECT_DIR = Path(__file__).resolve().parent
+
+
+def _app_dir() -> Path:
+    """Directory holding state files (profiles, .active_profile, launcher).
+    Frozen exe: next to the .exe. Source: next to engine.py."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+PROJECT_DIR = _app_dir()
 PROFILES_DIR = PROJECT_DIR / "ClaudeProfiles"
-LAUNCHER = PROJECT_DIR / "launcher.pyw"
+LAUNCHER = PROJECT_DIR / "launcher.pyw"           # used in source mode
+LAUNCHER_EXE = PROJECT_DIR / "launcher.exe"       # used in frozen mode
 ACTIVE_FILE = PROJECT_DIR / ".active_profile"
 
 PROTOCOL = "claude"
@@ -26,6 +37,14 @@ INVALID_CHARS = '<>:"/\\|?*'
 
 NO_WINDOW = 0x08000000                       # CREATE_NO_WINDOW
 DETACHED_FLAGS = 0x00000008 | 0x00000200     # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
+
+def _launcher_invocation(arg: str) -> tuple[str, str]:
+    """Return (target_executable, args_string) to invoke the launcher with `arg`.
+    Frozen: launcher.exe + "<arg>".  Source: pythonw.exe + "launcher.pyw" "<arg>"."""
+    if getattr(sys, "frozen", False):
+        return str(LAUNCHER_EXE), f'"{arg}"'
+    return pythonw_path(), f'"{LAUNCHER}" "{arg}"'
 
 
 # --- Claude executable ---------------------------------------------------- #
@@ -261,13 +280,14 @@ def pythonw_path() -> str:
 def create_shortcut(name: str, exe: Path | None = None) -> Path:
     exe = exe or find_claude_exe()
     lnk = desktop_dir() / f"{name}.lnk"
+    target, args = _launcher_invocation(name)
     env = dict(
         os.environ,
         SC_LNK=str(lnk),
-        SC_TARGET=pythonw_path(),
-        SC_ARGS=f'"{LAUNCHER}" "{name}"',
+        SC_TARGET=target,
+        SC_ARGS=args,
         SC_WORK=str(PROJECT_DIR),
-        SC_ICON=str(exe) if exe else pythonw_path(),
+        SC_ICON=str(exe) if exe else target,
     )
     script = (
         "$w=New-Object -ComObject WScript.Shell;"
@@ -306,7 +326,8 @@ def login_routing_enabled() -> bool:
 
 
 def enable_login_routing() -> None:
-    command = f'"{pythonw_path()}" "{LAUNCHER}" "%1"'
+    target, args = _launcher_invocation("%1")
+    command = f'"{target}" {args}'
     uc.register_progid(PROGID, command)
     uc.set_protocol_default(PROTOCOL, PROGID)
 
