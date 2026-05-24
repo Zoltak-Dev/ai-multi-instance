@@ -41,7 +41,16 @@ No `pip install` — the project uses only the Python standard library.
 
 **Pre-built binary (no Python required)** — download `claude-multi-instance-vX.Y.Z-windows.zip` from [Releases](https://github.com/Zoltak-Dev/claude-multi-instance/releases), unzip both `.exe` files in the same folder, and run `claude-multi-instance.exe`.
 
-> ⚠️ **Windows SmartScreen warning** — the `.exe` files are unsigned (no code-signing certificate for this free project). The first time you run them, Windows will show *"Windows protected your PC"*. Click **More info** → **Run anyway**. Or right-click the file → **Properties** → tick **Unblock**. If you'd rather avoid the warning entirely, use the source install above.
+📹 **Video walkthrough** — installing the binary and disabling Smart App Control:
+
+https://github.com/user-attachments/assets/eb0052db-64ee-4ddc-8155-e5b9d92ca40d
+
+> ⚠️ **Windows blocks unsigned binaries by default.** Windows refuses to run any `.exe` without a code-signing certificate (which costs 300-600 €/year — not viable for a free project). To run the `.exe`:
+>
+> 1. **Windows Security** → **App & browser control** → **Smart App Control settings** → switch from **On** to **Off**
+> 2. Launch `claude-multi-instance.exe`. Windows will show *"Windows protected your PC"* → click **More info** → **Run anyway**
+>
+> If you'd rather skip all this, use the source install above — no warning, no setup.
 
 ## Usage
 
