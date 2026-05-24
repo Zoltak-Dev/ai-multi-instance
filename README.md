@@ -27,7 +27,9 @@ Run multiple accounts of the [Claude desktop app](https://claude.ai/download) on
 
 ## Install
 
-Windows 10+, Python 3.9+, Claude desktop installed.
+Windows 10+ and Claude desktop installed.
+
+**From source (recommended)** — requires Python 3.9+:
 
 ```powershell
 git clone https://github.com/Zoltak-Dev/claude-multi-instance.git
@@ -36,6 +38,10 @@ python main.py
 ```
 
 No `pip install` — the project uses only the Python standard library.
+
+**Pre-built binary (no Python required)** — download `claude-multi-instance-vX.Y.Z-windows.zip` from [Releases](https://github.com/Zoltak-Dev/claude-multi-instance/releases), unzip both `.exe` files in the same folder, and run `claude-multi-instance.exe`.
+
+> ⚠️ **Windows SmartScreen warning** — the `.exe` files are unsigned (no code-signing certificate for this free project). The first time you run them, Windows will show *"Windows protected your PC"*. Click **More info** → **Run anyway**. Or right-click the file → **Properties** → tick **Unblock**. If you'd rather avoid the warning entirely, use the source install above.
 
 ## Usage
 
