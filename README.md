@@ -82,9 +82,11 @@ The two binaries land in `dist/`. Ship them in the same folder — `claude-multi
 
 Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/claude-multi-instance/releases).
 
----
+## Star History
 
 If this tool saved you some headache, a ⭐ on the repo is appreciated — it's the only feedback signal I get and it really helps the project gain visibility.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Zoltak-Dev/claude-multi-instance&type=Date)](https://star-history.com/#Zoltak-Dev/claude-multi-instance&Date)
 
 ## License
 
