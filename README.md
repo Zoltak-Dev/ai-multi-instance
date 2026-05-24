@@ -82,6 +82,10 @@ The two binaries land in `dist/`. Ship them in the same folder — `claude-multi
 
 Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/claude-multi-instance/releases).
 
+---
+
+If this tool saved you some headache, a ⭐ on the repo is appreciated — it's the only feedback signal I get and it really helps the project gain visibility.
+
 ## License
 
 MIT
