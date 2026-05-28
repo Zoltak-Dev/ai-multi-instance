@@ -1,4 +1,4 @@
-"""Claude Multi-Instance — console menu.
+"""Claude / Codex Multi-Instance — console menu.
 
 Run with:  python main.py
 """
@@ -241,7 +241,7 @@ def action_delete(profiles: list[str]) -> None:
             failed.append(f"{name} ({e})")
     if failed:
         pause(f"  {RED}Could not delete: {'; '.join(failed)}{RESET}\n"
-              f"  Close Claude on those profiles first.  ")
+              f"  Close {engine.current_app().display} on those profiles first.  ")
 
 
 def action_toggle_login() -> None:

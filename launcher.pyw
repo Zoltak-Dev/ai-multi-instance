@@ -52,7 +52,7 @@ def main() -> int:
     if app is None:
         app = engine.CLAUDE  # last-resort default
 
-    engine.set_app(app)
+    engine.set_app(app, persist=False)
 
     exe = engine.find_app_exe()
     if exe is None:
@@ -68,8 +68,9 @@ def main() -> int:
         if data_dir is not None:
             cmd.append(f"--user-data-dir={data_dir}")
         cmd.append(url)
+        env = engine.profile_env(name) if name else None
         subprocess.Popen(
-            cmd, creationflags=engine.DETACHED_FLAGS, close_fds=True,
+            cmd, env=env, creationflags=engine.DETACHED_FLAGS, close_fds=True,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         return 0

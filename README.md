@@ -68,11 +68,29 @@ Profiles live in their own folders, kept fully separate per app:
 
 Deleting the folder is the same as deleting the profile.
 
-## Google login patch
+## How Codex multi-instance works
+
+The Claude desktop app respects Chromium's standard `--user-data-dir` flag: different value, different singleton lock, multiple instances run side by side. Codex doesn't — its `bootstrap.js` calls `app.setPath('userData', ...)` to a hardcoded path **before** `app.requestSingleInstanceLock()`, so the CLI flag never reaches the singleton check and any second launch exits immediately.
+
+While digging through the unpacked `app.asar`, I found Codex reads an undocumented env var first:
+
+```js
+function _({appDataPath, env}) {
+    let a = env.CODEX_ELECTRON_USER_DATA_PATH?.trim();
+    if (a) return resolve(a);
+    // ... otherwise fall back to the hardcoded path
+}
+```
+
+So this tool launches each Codex profile with `CODEX_ELECTRON_USER_DATA_PATH=<profile_dir>/electron`. Different value per profile → different Electron singleton scope → genuine concurrent instances, zero registry hacks, zero admin elevation. The env var sticks in the process environment for the lifetime of `Codex.exe`, so it keeps working even after the menu closes.
+
+A second env var, `CODEX_HOME=<profile_dir>/.codex`, isolates the OpenAI CLI auth file (`~/.codex/auth.json`) so each profile signs in to its own account.
+
+## OAuth login patch
 
 Optional, toggled from the menu (`7`), and **per-app** — turning it on while the menu is on Claude affects `claude://`; switch to Codex (`8`) and toggle again to handle `codex://`.
 
-When enabled, the OAuth callback after a Google sign-in lands in the last profile you launched for that app, instead of whichever install happens to own the protocol at that moment.
+When enabled, the OAuth callback after a sign-in (Google for Claude, OpenAI for Codex) lands in the last profile you launched for that app, instead of whichever install happens to own the protocol at that moment.
 
 It works by registering this tool as the `claude://` / `codex://` handler in `HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\<scheme>`, with a valid Windows `UserChoice` hash so the desktop app can't silently reclaim the registration on its next launch. Disable it from the menu to revert.
 
@@ -88,7 +106,7 @@ pyinstaller --onefile --console   --name claude-multi-instance --clean --noconfi
 pyinstaller --onefile --noconsole --name launcher              --clean --noconfirm launcher.pyw
 ```
 
-The two binaries land in `dist/`. Ship them in the same folder — `claude-multi-instance.exe` looks for `launcher.exe` next to itself to wire up desktop shortcuts and the protocol handlers. State (profiles, `.active_claude`, `.active_codex`) also lives next to the exe.
+The two binaries land in `dist/`. Ship them in the same folder — `claude-multi-instance.exe` looks for `launcher.exe` next to itself to wire up desktop shortcuts and the protocol handlers. State (profiles, `state.json`) also lives next to the exe.
 
 Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/claude-multi-instance/releases).
 

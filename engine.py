@@ -2,12 +2,14 @@
 
 State lives next to this file:
   <App.profiles_dirname>/<name>/  -> --user-data-dir for each profile
-  <App.active_filename>           -> name of the last profile launched
+  state.json                       -> selected app + active profile per app
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -27,7 +29,13 @@ class App:
     protocol: str          # URL scheme for OAuth callbacks
     progid: str            # registry ProgID for protocol routing
     profiles_dirname: str
-    active_filename: str
+    # Optional per-profile env overrides. Used when the app stores state
+    # outside the Chromium --user-data-dir (e.g. Codex's ~/.codex/auth.json)
+    # or when it explicitly ignores --user-data-dir and reads a custom env
+    # var (e.g. CODEX_ELECTRON_USER_DATA_PATH, which Codex consults BEFORE
+    # its singleton check so different values yield separate instances).
+    # Format: tuple of (env_var_name, relative_subpath_under_profile_dir).
+    env_overrides: tuple[tuple[str, str], ...] = ()
 
 
 CLAUDE = App(
@@ -35,20 +43,30 @@ CLAUDE = App(
     package_filter="*Claude*", publisher_hash="pzs8sxrjxfjjc",
     package_prefix="Claude_", exe_name="claude.exe",
     protocol="claude", progid="ClaudeMultiInstance",
-    profiles_dirname="ClaudeProfiles", active_filename=".active_claude",
+    profiles_dirname="ClaudeProfiles",
 )
 CODEX = App(
     key="codex", display="Codex",
     package_filter="*Codex*", publisher_hash="2p2nqsd0c76g0",
     package_prefix="OpenAI.Codex_", exe_name="Codex.exe",
     protocol="codex", progid="CodexMultiInstance",
-    profiles_dirname="CodexProfiles", active_filename=".active_codex",
+    profiles_dirname="CodexProfiles",
+    env_overrides=(
+        # CLI auth (~/.codex/auth.json) — keeps OpenAI sign-in per profile.
+        ("CODEX_HOME", ".codex"),
+        # Electron userData path — Codex reads this BEFORE its singleton
+        # check, so each profile gets its own Electron lock scope and runs
+        # truly in parallel. See app.asar bootstrap.js.
+        ("CODEX_ELECTRON_USER_DATA_PATH", "electron"),
+    ),
 )
 APPS: dict[str, App] = {a.key: a for a in (CLAUDE, CODEX)}
 
 INVALID_CHARS = '<>:"/\\|?*'
 NO_WINDOW = 0x08000000
 DETACHED_FLAGS = 0x00000008 | 0x00000200
+
+_exe_cache: dict[str, Path | None] = {}
 
 
 def _app_dir() -> Path:
@@ -61,29 +79,69 @@ def _app_dir() -> Path:
 PROJECT_DIR = _app_dir()
 LAUNCHER = PROJECT_DIR / "launcher.pyw"
 LAUNCHER_EXE = PROJECT_DIR / "launcher.exe"
+STATE_FILE = PROJECT_DIR / "state.json"
 
-# Current app state (mutable via set_app). PROFILES_DIR and ACTIVE_FILE are kept
-# as module attributes so the rest of the code reads cleanly.
+
+# --- Consolidated state (state.json) -------------------------------------- #
+# Schema:
+#   { "selected_app": "claude"|"codex",
+#     "active_profiles": { "claude": "<name>", "codex": "<name>" } }
+def _load_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_state(state: dict) -> None:
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _set_active(app_key: str, profile: str | None) -> None:
+    state = _load_state()
+    active = state.setdefault("active_profiles", {})
+    if profile is None:
+        active.pop(app_key, None)
+    else:
+        active[app_key] = profile
+    _save_state(state)
+
+
+# Current app (mutable via set_app). PROFILES_DIR mirrors it for cleaner reads.
 _current: App = CLAUDE
 PROFILES_DIR: Path = PROJECT_DIR / CLAUDE.profiles_dirname
-ACTIVE_FILE: Path = PROJECT_DIR / CLAUDE.active_filename
 
 
 def current_app() -> App:
     return _current
 
 
-def set_app(app: App) -> None:
-    global _current, PROFILES_DIR, ACTIVE_FILE
+def set_app(app: App, *, persist: bool = True) -> None:
+    global _current, PROFILES_DIR
     _current = app
     PROFILES_DIR = PROJECT_DIR / app.profiles_dirname
-    ACTIVE_FILE = PROJECT_DIR / app.active_filename
-    _exe_cache.clear()
+    if persist:
+        state = _load_state()
+        state["selected_app"] = app.key
+        _save_state(state)
+
+
+def _restore_selected_app() -> None:
+    key = _load_state().get("selected_app")
+    if isinstance(key, str) and key in APPS and key != _current.key:
+        set_app(APPS[key], persist=False)
+
+
+_restore_selected_app()
 
 
 def _launcher_invocation(arg: str, app: App | None = None) -> tuple[str, str]:
-    """Return (target_executable, args_string) for launcher with `arg`.
-    If `app` is given, prefix with --app=<key> so the launcher knows which app."""
+    """Return (target_executable, args_string) for launcher with `arg`. The
+    args string always carries --app=<key> so the launcher routes to the right
+    app — defaults to the current one when `app` is omitted."""
     app = app or _current
     arg_prefix = f"--app={app.key} "
     if getattr(sys, "frozen", False):
@@ -92,9 +150,6 @@ def _launcher_invocation(arg: str, app: App | None = None) -> tuple[str, str]:
 
 
 # --- Executable discovery ------------------------------------------------- #
-_exe_cache: dict[str, Path | None] = {}
-
-
 def find_app_exe(refresh: bool = False, app: App | None = None) -> Path | None:
     """Locate the app's main exe. MSIX install path changes on every update,
     so query Get-AppxPackage and cache per session."""
@@ -141,11 +196,6 @@ def app_version(exe: Path | None) -> str:
         return "?"
 
 
-# Back-compat aliases (in case anything external imports the old names).
-find_claude_exe = find_app_exe
-claude_version = app_version
-
-
 # --- Profiles ------------------------------------------------------------- #
 def list_profiles() -> list[Path]:
     if not PROFILES_DIR.is_dir():
@@ -166,6 +216,15 @@ def create_profile(name: str) -> Path:
     return profile
 
 
+def _force_rw(func, path, _exc):
+    """rmtree error handler: clear read-only bit (Git pack .idx files set it) and retry."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
 def delete_profile(name: str) -> None:
     profile = PROFILES_DIR / name
     lnk = desktop_dir() / shortcut_filename(name)
@@ -175,12 +234,13 @@ def delete_profile(name: str) -> None:
         except OSError:
             pass
     if profile.exists():
-        shutil.rmtree(profile)
+        # onexc replaces onerror in 3.12+; pass both for portability.
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(profile, onexc=_force_rw)
+        else:
+            shutil.rmtree(profile, onerror=_force_rw)
     if active_profile() == name:
-        try:
-            ACTIVE_FILE.unlink()
-        except OSError:
-            pass
+        _set_active(_current.key, None)
 
 
 def rename_profile(old: str, new: str) -> None:
@@ -201,17 +261,14 @@ def rename_profile(old: str, new: str) -> None:
         create_shortcut(new)
 
     if active_profile() == old:
-        ACTIVE_FILE.write_text(new, encoding="utf-8")
+        _set_active(_current.key, new)
 
 
 def active_profile() -> str:
-    if not ACTIVE_FILE.exists():
+    name = _load_state().get("active_profiles", {}).get(_current.key, "")
+    if not isinstance(name, str) or not name:
         return ""
-    try:
-        name = ACTIVE_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    if not name or not (PROFILES_DIR / name).is_dir():
+    if not (PROFILES_DIR / name).is_dir():
         return ""
     return name
 
@@ -278,15 +335,28 @@ def close_profile(name: str) -> int:
     return killed
 
 
+def profile_env(name: str) -> dict[str, str]:
+    """Return the environment Popen should use for `name` under the current app.
+    Adds every per-profile env override defined on the app (e.g. CODEX_HOME,
+    CODEX_ELECTRON_USER_DATA_PATH)."""
+    env = dict(os.environ)
+    for var, sub in _current.env_overrides:
+        target = PROFILES_DIR / name / sub
+        target.mkdir(parents=True, exist_ok=True)
+        env[var] = str(target)
+    return env
+
+
 def launch_profile(name: str, exe: Path | None = None) -> None:
     exe = exe or find_app_exe()
     if exe is None:
         raise RuntimeError(f"{_current.display} not found. Is the desktop app installed?")
     data_dir = PROFILES_DIR / name
     data_dir.mkdir(parents=True, exist_ok=True)
-    ACTIVE_FILE.write_text(name, encoding="utf-8")
+    _set_active(_current.key, name)
     subprocess.Popen(
         [str(exe), f"--user-data-dir={data_dir}"],
+        env=profile_env(name),
         creationflags=DETACHED_FLAGS, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
