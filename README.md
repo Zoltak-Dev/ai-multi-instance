@@ -1,14 +1,14 @@
-# Claude Multi-Instance
+# Claude / Codex Multi-Instance
 
-Run multiple accounts of the [Claude desktop app](https://claude.ai/download) on Windows. The official client only supports one account at a time — this tool launches `claude.exe` with a dedicated profile directory so you can sign in to several accounts and switch between them.
+Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **and** the [Codex desktop app](https://chatgpt.com/codex) on Windows. The official clients only support one account at a time — this tool launches `claude.exe` / `Codex.exe` with a dedicated profile directory per account so you can sign in to several and switch between them.
 
 ```
 ────────────────────────────────────────────────────
-  Claude Multi-Instance
+  Claude Multi-Instance  [switch with 8]
 ────────────────────────────────────────────────────
-  Claude desktop  : v1.8555.2.0
+  Claude desktop  : v1.9255.2.0
   Login patch     : on
-  Google login →  : work
+  claude:// login → : work
 
   Profiles (3)
     1. perso     [shortcut]
@@ -22,12 +22,15 @@ Run multiple accounts of the [Claude desktop app](https://claude.ai/download) on
     5  Toggle desktop shortcut
     6  Delete profile(s)
     7  Disable login patch
+    8  Switch to Codex
     0  Quit
 ```
 
+Press `8` to flip the whole menu over to Codex — Codex gets its own profiles, its own shortcuts, and its own `codex://` login patch, fully independent from Claude.
+
 ## Install
 
-Windows 10+ and Claude desktop installed.
+Windows 10+ and the Claude and/or Codex desktop app installed.
 
 **From source (recommended)** — requires Python 3.9+:
 
@@ -56,15 +59,22 @@ https://github.com/user-attachments/assets/eb0052db-64ee-4ddc-8155-e5b9d92ca40d
 
 The menu is numbered. Pick an action, then pick a profile by its number. For actions that support it, you can pass several numbers separated by spaces (`1 3 5`) to run on multiple profiles at once.
 
-Creating a profile also creates a desktop shortcut. Double-click the shortcut to launch that profile without opening the menu — useful for daily use.
+Creating a profile also creates a desktop shortcut. Double-click the shortcut to launch that profile without opening the menu — useful for daily use. Shortcuts are prefixed with the app name (`Claude - work.lnk`, `Codex - work.lnk`) so a profile of the same name in each app doesn't collide.
 
-Profiles live in `ClaudeProfiles/<name>/`. Deleting the folder is the same as deleting the profile.
+Profiles live in their own folders, kept fully separate per app:
+
+- `ClaudeProfiles/<name>/` for Claude
+- `CodexProfiles/<name>/` for Codex
+
+Deleting the folder is the same as deleting the profile.
 
 ## Google login patch
 
-Optional, toggled from the menu (`7`). When enabled, the OAuth callback after a Google sign-in lands in the last profile you launched, instead of whichever Claude install happens to own the `claude://` protocol at that moment.
+Optional, toggled from the menu (`7`), and **per-app** — turning it on while the menu is on Claude affects `claude://`; switch to Codex (`8`) and toggle again to handle `codex://`.
 
-It works by registering this tool as the `claude://` handler in `HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\claude`, with a valid Windows `UserChoice` hash so Claude can't silently reclaim the registration on its next launch. Disable it from the menu to revert.
+When enabled, the OAuth callback after a Google sign-in lands in the last profile you launched for that app, instead of whichever install happens to own the protocol at that moment.
+
+It works by registering this tool as the `claude://` / `codex://` handler in `HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\<scheme>`, with a valid Windows `UserChoice` hash so the desktop app can't silently reclaim the registration on its next launch. Disable it from the menu to revert.
 
 The patch is a registry entry, so it stays active after you close the menu.
 
@@ -78,7 +88,7 @@ pyinstaller --onefile --console   --name claude-multi-instance --clean --noconfi
 pyinstaller --onefile --noconsole --name launcher              --clean --noconfirm launcher.pyw
 ```
 
-The two binaries land in `dist/`. Ship them in the same folder — `claude-multi-instance.exe` looks for `launcher.exe` next to itself to wire up desktop shortcuts and the `claude://` handler. State (profiles, `.active_profile`) also lives next to the exe.
+The two binaries land in `dist/`. Ship them in the same folder — `claude-multi-instance.exe` looks for `launcher.exe` next to itself to wire up desktop shortcuts and the protocol handlers. State (profiles, `.active_claude`, `.active_codex`) also lives next to the exe.
 
 Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/claude-multi-instance/releases).
 

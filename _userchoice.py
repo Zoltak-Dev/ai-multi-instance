@@ -1,13 +1,13 @@
-"""Set a per-user default handler for a URL protocol (e.g. ``claude://``).
+"""Set a per-user default handler for a URL protocol (e.g. ``claude://`` or ``codex://``).
 
 Windows protects protocol/file defaults with a per-user "UserChoice" hash so
 that only a real user choice is honored. This module computes that hash in pure
 Python (the documented algorithm, same one used by SetUserFTA and Mozilla's
-WindowsUserChoice), which lets us point ``claude://`` at our own handler and
-route OAuth login callbacks to the right Claude profile.
+WindowsUserChoice), which lets us point a custom scheme at our own handler and
+route OAuth login callbacks to the right profile.
 
 Note: the UCPD driver only locks http/https/.pdf; custom protocols like
-``claude://`` can still be set this way.
+``claude://`` or ``codex://`` can still be set this way.
 """
 import base64
 import hashlib
@@ -130,7 +130,7 @@ def _proto_key(protocol: str) -> str:
     return r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\%s\UserChoice" % protocol
 
 
-def register_progid(progid: str, command: str, friendly: str = "URL:Claude Multi-Instance") -> None:
+def register_progid(progid: str, command: str, friendly: str = "URL:Multi-Instance") -> None:
     with winreg.CreateKey(_HKCU, r"Software\Classes\%s" % progid) as k:
         winreg.SetValueEx(k, "", 0, winreg.REG_SZ, friendly)
         winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")

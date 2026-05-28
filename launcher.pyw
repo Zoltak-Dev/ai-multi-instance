@@ -1,7 +1,10 @@
-"""Headless launcher for Claude profiles. No console window.
+"""Headless launcher for Claude/Codex profiles. No console window.
 
-  launcher.pyw "<profile-name>"  -> open the profile, record it as active
-  launcher.pyw "claude://..."    -> OAuth callback, send URL to the active profile
+  launcher.pyw --app=<key> "<profile-name>"  -> open profile in that app
+  launcher.pyw --app=<key> "<scheme>://..."  -> OAuth callback to active profile
+
+The --app flag is added automatically by shortcuts and by the protocol
+registry handler. If absent, the URL scheme is used as a fallback.
 """
 import subprocess
 import sys
@@ -11,23 +14,53 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import engine
 
 
-def _error(message: str) -> None:
+def _error(message: str, title: str = "Multi-Instance") -> None:
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(0, message, "Claude Multi-Instance", 0x10)
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)
     except Exception:
         pass
 
 
-def main() -> int:
-    args = [a for a in sys.argv[1:] if a.strip()]
-    url = next((a for a in args if a.startswith("claude://")), None)
+def _parse_args(argv: list[str]) -> tuple[engine.App | None, list[str]]:
+    """Pop --app=<key> from argv (or default by URL scheme later). Returns (app, rest)."""
+    app: engine.App | None = None
+    rest: list[str] = []
+    for a in argv:
+        if not a.strip():
+            continue
+        if a.startswith("--app="):
+            app = engine.APPS.get(a.split("=", 1)[1].strip().lower())
+        else:
+            rest.append(a)
+    return app, rest
 
-    exe = engine.find_claude_exe()
+
+def main() -> int:
+    app, args = _parse_args(sys.argv[1:])
+
+    # Fallback: detect app from a URL scheme.
+    if app is None:
+        for a in args:
+            scheme = a.split(":", 1)[0].lower() if ":" in a else ""
+            for candidate in engine.APPS.values():
+                if scheme == candidate.protocol:
+                    app = candidate
+                    break
+            if app is not None:
+                break
+    if app is None:
+        app = engine.CLAUDE  # last-resort default
+
+    engine.set_app(app)
+
+    exe = engine.find_app_exe()
     if exe is None:
-        _error("Claude not found.\nIs the desktop app installed?")
+        _error(f"{app.display} not found.\nIs the desktop app installed?",
+               f"{app.display} Multi-Instance")
         return 1
 
+    url = next((a for a in args if a.startswith(f"{app.protocol}://")), None)
     if url:
         name = engine.active_profile()
         data_dir = engine.PROFILES_DIR / name if name else None
@@ -43,13 +76,14 @@ def main() -> int:
 
     name = args[0] if args else ""
     if not name:
-        _error("Usage: launcher.pyw <profile-name>")
+        _error("Usage: launcher.pyw --app=<claude|codex> <profile-name>",
+               f"{app.display} Multi-Instance")
         return 2
 
     try:
         engine.launch_profile(name, exe=exe)
     except RuntimeError as e:
-        _error(str(e))
+        _error(str(e), f"{app.display} Multi-Instance")
         return 1
     return 0
 

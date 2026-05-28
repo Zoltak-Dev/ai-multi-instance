@@ -1,8 +1,8 @@
-"""Profile and process management for Claude Multi-Instance.
+"""Profile and process management for Claude/Codex Multi-Instance.
 
 State lives next to this file:
-  ClaudeProfiles/<name>/  -> Claude's --user-data-dir for each profile
-  .active_profile         -> name of the last profile launched (for claude:// routing)
+  <App.profiles_dirname>/<name>/  -> --user-data-dir for each profile
+  <App.active_filename>           -> name of the last profile launched
 """
 from __future__ import annotations
 
@@ -10,65 +10,109 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import _userchoice as uc
 
-PUBLISHER_HASH = "pzs8sxrjxfjjc"
+
+@dataclass(frozen=True)
+class App:
+    key: str
+    display: str
+    package_filter: str    # Get-AppxPackage -Name pattern
+    publisher_hash: str    # WindowsApps fallback suffix
+    package_prefix: str    # WindowsApps folder prefix, e.g. "Claude_" or "OpenAI.Codex_"
+    exe_name: str          # filename inside <pkg>/app/
+    protocol: str          # URL scheme for OAuth callbacks
+    progid: str            # registry ProgID for protocol routing
+    profiles_dirname: str
+    active_filename: str
+
+
+CLAUDE = App(
+    key="claude", display="Claude",
+    package_filter="*Claude*", publisher_hash="pzs8sxrjxfjjc",
+    package_prefix="Claude_", exe_name="claude.exe",
+    protocol="claude", progid="ClaudeMultiInstance",
+    profiles_dirname="ClaudeProfiles", active_filename=".active_claude",
+)
+CODEX = App(
+    key="codex", display="Codex",
+    package_filter="*Codex*", publisher_hash="2p2nqsd0c76g0",
+    package_prefix="OpenAI.Codex_", exe_name="Codex.exe",
+    protocol="codex", progid="CodexMultiInstance",
+    profiles_dirname="CodexProfiles", active_filename=".active_codex",
+)
+APPS: dict[str, App] = {a.key: a for a in (CLAUDE, CODEX)}
+
+INVALID_CHARS = '<>:"/\\|?*'
+NO_WINDOW = 0x08000000
+DETACHED_FLAGS = 0x00000008 | 0x00000200
 
 
 def _app_dir() -> Path:
-    """Directory holding state files (profiles, .active_profile, launcher).
-    Frozen exe: next to the .exe. Source: next to engine.py."""
+    """Directory holding state files. Frozen exe: next to .exe. Source: next to engine.py."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
 PROJECT_DIR = _app_dir()
-PROFILES_DIR = PROJECT_DIR / "ClaudeProfiles"
-LAUNCHER = PROJECT_DIR / "launcher.pyw"           # used in source mode
-LAUNCHER_EXE = PROJECT_DIR / "launcher.exe"       # used in frozen mode
-ACTIVE_FILE = PROJECT_DIR / ".active_profile"
+LAUNCHER = PROJECT_DIR / "launcher.pyw"
+LAUNCHER_EXE = PROJECT_DIR / "launcher.exe"
 
-PROTOCOL = "claude"
-PROGID = "ClaudeMultiInstance"
-INVALID_CHARS = '<>:"/\\|?*'
-
-NO_WINDOW = 0x08000000                       # CREATE_NO_WINDOW
-DETACHED_FLAGS = 0x00000008 | 0x00000200     # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+# Current app state (mutable via set_app). PROFILES_DIR and ACTIVE_FILE are kept
+# as module attributes so the rest of the code reads cleanly.
+_current: App = CLAUDE
+PROFILES_DIR: Path = PROJECT_DIR / CLAUDE.profiles_dirname
+ACTIVE_FILE: Path = PROJECT_DIR / CLAUDE.active_filename
 
 
-def _launcher_invocation(arg: str) -> tuple[str, str]:
-    """Return (target_executable, args_string) to invoke the launcher with `arg`.
-    Frozen: launcher.exe + "<arg>".  Source: pythonw.exe + "launcher.pyw" "<arg>"."""
+def current_app() -> App:
+    return _current
+
+
+def set_app(app: App) -> None:
+    global _current, PROFILES_DIR, ACTIVE_FILE
+    _current = app
+    PROFILES_DIR = PROJECT_DIR / app.profiles_dirname
+    ACTIVE_FILE = PROJECT_DIR / app.active_filename
+    _exe_cache.clear()
+
+
+def _launcher_invocation(arg: str, app: App | None = None) -> tuple[str, str]:
+    """Return (target_executable, args_string) for launcher with `arg`.
+    If `app` is given, prefix with --app=<key> so the launcher knows which app."""
+    app = app or _current
+    arg_prefix = f"--app={app.key} "
     if getattr(sys, "frozen", False):
-        return str(LAUNCHER_EXE), f'"{arg}"'
-    return pythonw_path(), f'"{LAUNCHER}" "{arg}"'
+        return str(LAUNCHER_EXE), f'{arg_prefix}"{arg}"'
+    return pythonw_path(), f'"{LAUNCHER}" {arg_prefix}"{arg}"'
 
 
-# --- Claude executable ---------------------------------------------------- #
-_exe_cache: tuple[bool, Path | None] = (False, None)
+# --- Executable discovery ------------------------------------------------- #
+_exe_cache: dict[str, Path | None] = {}
 
 
-def find_claude_exe(refresh: bool = False) -> Path | None:
-    """Locate claude.exe. The MSIX install path changes on every Claude update,
-    so this is queried via Get-AppxPackage and cached for the session."""
-    global _exe_cache
-    if not refresh and _exe_cache[0]:
-        return _exe_cache[1]
+def find_app_exe(refresh: bool = False, app: App | None = None) -> Path | None:
+    """Locate the app's main exe. MSIX install path changes on every update,
+    so query Get-AppxPackage and cache per session."""
+    app = app or _current
+    if not refresh and app.key in _exe_cache:
+        return _exe_cache[app.key]
 
     exe: Path | None = None
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "(Get-AppxPackage -Name *Claude*).InstallLocation"],
+             f"(Get-AppxPackage -Name {app.package_filter}).InstallLocation"],
             capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         out = ""
     for line in out.splitlines():
-        candidate = Path(line.strip()) / "app" / "claude.exe"
+        candidate = Path(line.strip()) / "app" / app.exe_name
         if candidate.is_file():
             exe = candidate
             break
@@ -76,25 +120,30 @@ def find_claude_exe(refresh: bool = False) -> Path | None:
     if exe is None:
         apps = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "WindowsApps"
         try:
-            for pkg in sorted(apps.glob(f"Claude_*__{PUBLISHER_HASH}"), reverse=True):
-                candidate = pkg / "app" / "claude.exe"
+            for pkg in sorted(apps.glob(f"{app.package_prefix}*__{app.publisher_hash}"), reverse=True):
+                candidate = pkg / "app" / app.exe_name
                 if candidate.is_file():
                     exe = candidate
                     break
         except OSError:
             pass
 
-    _exe_cache = (True, exe)
+    _exe_cache[app.key] = exe
     return exe
 
 
-def claude_version(exe: Path | None) -> str:
+def app_version(exe: Path | None) -> str:
     if exe is None:
         return ""
     try:
         return exe.parent.parent.name.split("_")[1]
     except IndexError:
         return "?"
+
+
+# Back-compat aliases (in case anything external imports the old names).
+find_claude_exe = find_app_exe
+claude_version = app_version
 
 
 # --- Profiles ------------------------------------------------------------- #
@@ -118,12 +167,8 @@ def create_profile(name: str) -> Path:
 
 
 def delete_profile(name: str) -> None:
-    """Delete the profile directory and its desktop shortcut.
-
-    Raises OSError if Claude is still holding files in the directory.
-    """
     profile = PROFILES_DIR / name
-    lnk = desktop_dir() / f"{name}.lnk"
+    lnk = desktop_dir() / shortcut_filename(name)
     if lnk.exists():
         try:
             lnk.unlink()
@@ -160,7 +205,6 @@ def rename_profile(old: str, new: str) -> None:
 
 
 def active_profile() -> str:
-    """Last profile launched, or '' if the file is absent or stale."""
     if not ACTIVE_FILE.exists():
         return ""
     try:
@@ -174,12 +218,13 @@ def active_profile() -> str:
 
 # --- Running processes ---------------------------------------------------- #
 def running_profiles() -> dict[str, list[int]]:
-    """Return {profile_name: [pids]} for every Claude.exe currently using one
-    of our --user-data-dir paths. Includes Electron child processes."""
+    """Return {profile_name: [pids]} for processes of the current app using
+    one of our --user-data-dir paths."""
+    exe_name = _current.exe_name
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"Name='Claude.exe'\" "
+             f"Get-CimInstance Win32_Process -Filter \"Name='{exe_name}'\" "
              "| ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }"],
             capture_output=True, text=True, timeout=10, creationflags=NO_WINDOW,
         )
@@ -218,7 +263,6 @@ def running_profiles() -> dict[str, list[int]]:
 
 
 def close_profile(name: str) -> int:
-    """Kill the Claude.exe tree for this profile. Returns number of PIDs killed."""
     pids = running_profiles().get(name, [])
     killed = 0
     for pid in pids:
@@ -235,13 +279,12 @@ def close_profile(name: str) -> int:
 
 
 def launch_profile(name: str, exe: Path | None = None) -> None:
-    exe = exe or find_claude_exe()
+    exe = exe or find_app_exe()
     if exe is None:
-        raise RuntimeError("Claude not found. Is the desktop app installed?")
+        raise RuntimeError(f"{_current.display} not found. Is the desktop app installed?")
     data_dir = PROFILES_DIR / name
     data_dir.mkdir(parents=True, exist_ok=True)
     ACTIVE_FILE.write_text(name, encoding="utf-8")
-    # Silence Electron stdout/stderr so node warnings don't bleed into our terminal.
     subprocess.Popen(
         [str(exe), f"--user-data-dir={data_dir}"],
         creationflags=DETACHED_FLAGS, close_fds=True,
@@ -277,9 +320,14 @@ def pythonw_path() -> str:
     return str(candidate) if candidate.exists() else sys.executable
 
 
+def shortcut_filename(name: str) -> str:
+    """Per-app shortcut filename, prefixed so Claude and Codex profiles don't collide."""
+    return f"{_current.display} - {name}.lnk"
+
+
 def create_shortcut(name: str, exe: Path | None = None) -> Path:
-    exe = exe or find_claude_exe()
-    lnk = desktop_dir() / f"{name}.lnk"
+    exe = exe or find_app_exe()
+    lnk = desktop_dir() / shortcut_filename(name)
     target, args = _launcher_invocation(name)
     env = dict(
         os.environ,
@@ -306,11 +354,11 @@ def create_shortcut(name: str, exe: Path | None = None) -> Path:
 
 
 def shortcut_exists(name: str) -> bool:
-    return (desktop_dir() / f"{name}.lnk").exists()
+    return (desktop_dir() / shortcut_filename(name)).exists()
 
 
 def delete_shortcut(name: str) -> bool:
-    lnk = desktop_dir() / f"{name}.lnk"
+    lnk = desktop_dir() / shortcut_filename(name)
     if not lnk.exists():
         return False
     try:
@@ -320,17 +368,18 @@ def delete_shortcut(name: str) -> bool:
         return False
 
 
-# --- Login routing (claude:// -> active profile) -------------------------- #
+# --- Login routing (claude://, codex:// -> active profile of that app) ---- #
 def login_routing_enabled() -> bool:
-    return uc.current_default(PROTOCOL) == PROGID
+    return uc.current_default(_current.protocol) == _current.progid
 
 
 def enable_login_routing() -> None:
     target, args = _launcher_invocation("%1")
     command = f'"{target}" {args}'
-    uc.register_progid(PROGID, command)
-    uc.set_protocol_default(PROTOCOL, PROGID)
+    friendly = f"URL:{_current.display} Multi-Instance"
+    uc.register_progid(_current.progid, command, friendly=friendly)
+    uc.set_protocol_default(_current.protocol, _current.progid)
 
 
 def disable_login_routing() -> None:
-    uc.clear_protocol_default(PROTOCOL)
+    uc.clear_protocol_default(_current.protocol)

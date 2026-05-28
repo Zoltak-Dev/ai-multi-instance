@@ -42,28 +42,30 @@ def _clear_and_write(text: str) -> None:
 
 # --- Frame rendering ------------------------------------------------------ #
 def render(profiles: list[str]) -> str:
-    exe = engine.find_claude_exe()
-    version = engine.claude_version(exe) if exe else None
+    app = engine.current_app()
+    exe = engine.find_app_exe()
+    version = engine.app_version(exe) if exe else None
     routing = engine.login_routing_enabled()
     active = engine.active_profile()
     bar = "─" * 52
 
     out: list[str] = []
     out.append(f"{CYAN}{bar}{RESET}")
-    out.append(f"{BOLD}  Claude Multi-Instance{RESET}")
+    out.append(f"{BOLD}  {app.display} Multi-Instance{RESET}  {DIM}[switch with 8]{RESET}")
     out.append(f"{CYAN}{bar}{RESET}")
+    label_app = f"{app.display} desktop".ljust(15)
     if version:
-        out.append(f"  Claude desktop  {GREY}:{RESET} v{version}")
+        out.append(f"  {label_app} {GREY}:{RESET} v{version}")
     else:
-        out.append(f"  Claude desktop  {GREY}:{RESET} {RED}not found{RESET}")
+        out.append(f"  {label_app} {GREY}:{RESET} {RED}not found{RESET}")
 
     state = f"{GREEN}on{RESET}" if routing else f"{GREY}off{RESET}"
     out.append(f"  Login patch     {GREY}:{RESET} {state}")
     if routing:
         target = active if active else f"{YELLOW}none yet — launch a profile first{RESET}"
-        out.append(f"  Google login →  {GREY}:{RESET} {target}")
+        out.append(f"  {app.protocol}:// login → {GREY}:{RESET} {target}")
     else:
-        out.append(f"  Google login →  {GREY}:{RESET} {DIM}default Claude (patch off){RESET}")
+        out.append(f"  {app.protocol}:// login → {GREY}:{RESET} {DIM}default {app.display} (patch off){RESET}")
     out.append("")
 
     out.append(f"  {BOLD}Profiles ({len(profiles)}){RESET}")
@@ -84,6 +86,8 @@ def render(profiles: list[str]) -> str:
     out.append(f"    {CYAN}5{RESET}  Toggle desktop shortcut")
     out.append(f"    {CYAN}6{RESET}  Delete profile(s)")
     out.append(f"    {CYAN}7{RESET}  {toggle_label} login patch")
+    other = engine.CODEX if engine.current_app() is engine.CLAUDE else engine.CLAUDE
+    out.append(f"    {CYAN}8{RESET}  Switch to {other.display}")
     out.append(f"    {CYAN}0{RESET}  Quit")
     out.append("")
     out.append(f"  {DIM}Tip: multi-select with spaces, e.g. '1 3 5'{RESET}")
@@ -270,6 +274,9 @@ def loop() -> None:
             action_delete(profiles)
         elif choice == "7":
             action_toggle_login()
+        elif choice == "8":
+            other = engine.CODEX if engine.current_app() is engine.CLAUDE else engine.CLAUDE
+            engine.set_app(other)
         elif choice == "0":
             return
         # Anything else: redraw on next iteration.
