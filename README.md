@@ -2,29 +2,7 @@
 
 Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **and** the [Codex desktop app](https://chatgpt.com/codex) on Windows. The official clients only support one account at a time — this tool launches `claude.exe` / `Codex.exe` with a dedicated profile directory per account so you can sign in to several and switch between them.
 
-```
-────────────────────────────────────────────────────
-  Claude Multi-Instance  [switch with 8]
-────────────────────────────────────────────────────
-  Claude desktop  : v1.9255.2.0
-  Login patch     : on
-  claude:// login → : work
-
-  Profiles (3)
-    1. perso     [shortcut]
-    2. test
-    3. work      [shortcut]
-
-    1  Launch profile(s)
-    2  Close profile(s)
-    3  Create a profile
-    4  Rename a profile
-    5  Toggle desktop shortcut
-    6  Delete profile(s)
-    7  Disable login patch
-    8  Switch to Codex
-    0  Quit
-```
+![Claude / Codex Multi-Instance preview](https://github.com/user-attachments/assets/12574118-ea86-4305-a50d-f1e4d7bca09b)
 
 Press `8` to flip the whole menu over to Codex — Codex gets its own profiles, its own shortcuts, and its own `codex://` login patch, fully independent from Claude.
 
