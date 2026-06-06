@@ -17,6 +17,7 @@ GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
 GREY = "\033[90m"
+CREDIT = "Credits: https://github.com/Zoltak-Dev"
 
 
 def _enable_ansi() -> None:
@@ -52,6 +53,7 @@ def render(profiles: list[str]) -> str:
     out: list[str] = []
     out.append(f"{CYAN}{bar}{RESET}")
     out.append(f"{BOLD}  {app.display} Multi-Instance{RESET}  {DIM}[switch with 8]{RESET}")
+    out.append(f"  {DIM}{CREDIT}{RESET}")
     out.append(f"{CYAN}{bar}{RESET}")
     label_app = f"{app.display} desktop".ljust(15)
     if version:
