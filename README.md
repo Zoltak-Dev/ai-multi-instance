@@ -92,7 +92,13 @@ Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/
 
 If this tool saved you some headache, a ⭐ on the repo is appreciated — it's the only feedback signal I get and it really helps the project gain visibility.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Zoltak-Dev/claude-multi-instance&type=Date)](https://star-history.com/#Zoltak-Dev/claude-multi-instance&Date)
+<a href="https://www.star-history.com/?type=date&repos=Zoltak-Dev%2Fclaude-multi-instance">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Zoltak-Dev/claude-multi-instance&type=date&theme=dark&legend=top-left" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Zoltak-Dev/claude-multi-instance&type=date&legend=top-left" />
+    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Zoltak-Dev/claude-multi-instance&type=date&legend=top-left" />
+  </picture>
+</a>
 
 ## License
 
