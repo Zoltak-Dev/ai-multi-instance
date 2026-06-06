@@ -102,11 +102,11 @@ Standalone `.exe` build via PyInstaller, for shipping to users who don't have Py
 
 ```powershell
 pip install pyinstaller
-pyinstaller --onefile --console   --name claude-multi-instance --clean --noconfirm main.py
+pyinstaller --onefile --console   --name ai-multi-instance --clean --noconfirm main.py
 pyinstaller --onefile --noconsole --name launcher              --clean --noconfirm launcher.pyw
 ```
 
-The two binaries land in `dist/`. Ship them in the same folder — `claude-multi-instance.exe` looks for `launcher.exe` next to itself to wire up desktop shortcuts and the protocol handlers. State (profiles, `state.json`) also lives next to the exe.
+The two binaries land in `dist/`. Ship them in the same folder — `ai-multi-instance.exe` looks for `launcher.exe` next to itself to wire up desktop shortcuts and the protocol handlers. State (profiles, `state.json`) also lives next to the exe.
 
 Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/claude-multi-instance/releases).
 
