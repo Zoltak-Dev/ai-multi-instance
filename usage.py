@@ -368,7 +368,7 @@ def fetch_usage(profile_dir: Path) -> ProfileUsage:
         session = _cache_get_session(name)  # fall back while the instance holds the lock
         cf = None
         if not session:
-            res.error = "app ouverte — ferme-la une fois" if status == "locked" else "non connecté"
+            res.error = "app open — close it once" if status == "locked" else "not signed in"
             return res
 
     cookie_header = f"sessionKey={session}" + (f"; cf_clearance={cf}" if cf else "")
@@ -384,12 +384,12 @@ def fetch_usage(profile_dir: Path) -> ProfileUsage:
         res.seven_day_opus = _utilization(data.get("seven_day_opus"))
         res.ok = True
     except urllib.error.HTTPError as exc:
-        res.error = {401: "session expirée", 403: "bloqué (Cloudflare)",
+        res.error = {401: "session expired", 403: "blocked (Cloudflare)",
                      429: "rate-limited"}.get(exc.code, f"HTTP {exc.code}")
         if exc.code == 401:
             _cache_drop(name)  # token rotated — drop it so the next read re-captures
     except urllib.error.URLError:
-        res.error = "réseau indisponible"
+        res.error = "network unavailable"
     except (OSError, ValueError, KeyError) as exc:
         res.error = exc.__class__.__name__
     return res
@@ -419,11 +419,11 @@ def humanize_reset(iso: str) -> str:
     now = datetime.now(when.tzinfo) if when.tzinfo else datetime.now()
     seconds = int((when - now).total_seconds())
     if seconds <= 0:
-        return "maintenant"
+        return "now"
     days, rem = divmod(seconds, 86_400)
     hours = rem // 3_600
     if days:
-        return f"dans {days}j {hours}h"
+        return f"in {days}d {hours}h"
     if hours:
-        return f"dans {hours}h"
-    return "dans <1h"
+        return f"in {hours}h"
+    return "in <1h"
