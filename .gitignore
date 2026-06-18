@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+
+# Runtime / user state (never commit — machine-specific or sensitive)
+state.json
+usage_cache.json
+ClaudeProfiles/
+CodexProfiles/
