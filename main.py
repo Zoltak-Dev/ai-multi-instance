@@ -300,7 +300,7 @@ def action_usage(profiles: list[str]) -> None:
         return
     dirs = [engine.PROFILES_DIR / name for name in profiles]
     while True:
-        sys.stdout.write(f"\n  {DIM}Fetching usage…{RESET}")
+        sys.stdout.write(f"\n  {DIM}Fetching usage...{RESET}")
         sys.stdout.flush()
         results = usage.fetch_all(dirs)
         _clear_and_write(render_usage(results))
