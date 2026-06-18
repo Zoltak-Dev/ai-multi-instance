@@ -8,6 +8,7 @@ import os
 import sys
 
 import engine
+import usage
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -90,6 +91,8 @@ def render(profiles: list[str]) -> str:
     out.append(f"    {CYAN}7{RESET}  {toggle_label} login patch")
     other = engine.CODEX if engine.current_app() is engine.CLAUDE else engine.CLAUDE
     out.append(f"    {CYAN}8{RESET}  Switch to {other.display}")
+    if app is engine.CLAUDE:
+        out.append(f"    {CYAN}9{RESET}  Usage (all accounts)")
     out.append(f"    {CYAN}0{RESET}  Quit")
     out.append("")
     out.append(f"  {DIM}Tip: multi-select with spaces, e.g. '1 3 5'{RESET}")
@@ -246,6 +249,59 @@ def action_delete(profiles: list[str]) -> None:
               f"  Close {engine.current_app().display} on those profiles first.  ")
 
 
+def _usage_pct(value: float | None) -> str:
+    """Percentage string, coloured by how close it is to the limit."""
+    text = usage.format_pct(value)
+    if value is None:
+        return f"{DIM}{text}{RESET}"
+    if value >= 90:
+        return f"{RED}{text}{RESET}"
+    if value >= 70:
+        return f"{YELLOW}{text}{RESET}"
+    return f"{GREEN}{text}{RESET}"
+
+
+def render_usage(results: list[usage.ProfileUsage]) -> str:
+    bar = "─" * 64
+    out: list[str] = [
+        "",
+        f"  {BOLD}Usage — Claude ({len(results)} account(s)){RESET}",
+        f"  {GREY}{bar}{RESET}",
+        f"  {DIM}{'Profile':<10}{'Account':<30}{'5h':>6}{'7d':>7}{'Opus':>7}  Resets{RESET}",
+    ]
+    for r in results:
+        name = (r.name[:9] + "…") if len(r.name) > 10 else r.name
+        if not r.ok:
+            out.append(f"  {name:<10}{DIM}{r.error}{RESET}")
+            continue
+        acc = (r.account[:27] + "…") if len(r.account) > 28 else r.account
+        # +len(...) compensates for the invisible ANSI codes inside the field.
+        five = _usage_pct(r.five_hour)
+        seven = _usage_pct(r.seven_day)
+        opus = _usage_pct(r.seven_day_opus)
+        out.append(
+            f"  {name:<10}{acc:<30}"
+            f"{five:>{6 + len(five) - len(usage.format_pct(r.five_hour))}}"
+            f"{seven:>{7 + len(seven) - len(usage.format_pct(r.seven_day))}}"
+            f"{opus:>{7 + len(opus) - len(usage.format_pct(r.seven_day_opus))}}"
+            f"  {usage.humanize_reset(r.resets_at)}"
+        )
+    out.append("")
+    return "\n".join(out)
+
+
+def action_usage(profiles: list[str]) -> None:
+    if not profiles:
+        ask(f"  {YELLOW}No profile.{RESET} [Enter] ")
+        return
+    sys.stdout.write(f"\n  {DIM}Fetching usage…{RESET}")
+    sys.stdout.flush()
+    dirs = [engine.PROFILES_DIR / name for name in profiles]
+    results = usage.fetch_all(dirs)
+    _clear_and_write(render_usage(results))
+    pause()
+
+
 def action_toggle_login() -> None:
     try:
         if engine.login_routing_enabled():
@@ -279,6 +335,8 @@ def loop() -> None:
         elif choice == "8":
             other = engine.CODEX if engine.current_app() is engine.CLAUDE else engine.CLAUDE
             engine.set_app(other)
+        elif choice == "9" and engine.current_app() is engine.CLAUDE:
+            action_usage(profiles)
         elif choice == "0":
             return
         # Anything else: redraw on next iteration.

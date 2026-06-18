@@ -64,6 +64,20 @@ It works by registering this tool as the `claude://` / `codex://` handler in `HK
 
 The patch is a registry entry, so it stays active after you close the menu.
 
+## Usage tracker
+
+Claude only, from the menu (`9`). Shows each account's current limits side by side — 5-hour session, 7-day weekly (and Opus), plus when each resets:
+
+```
+  Profile   Account                 5h     7d   Opus  Resets
+  work      you@example.com         0%    11%    n/a  in 1d 17h
+  perso     other@example.com       0%    10%    n/a  in 4d 12h
+```
+
+It reads each profile's claude.ai session straight from that profile's own cookie store and queries the official `claude.ai/api/.../usage` endpoint — per account, no logins required, with no third-party dependencies (DPAPI + AES-GCM via Windows CNG through `ctypes`).
+
+A running instance holds an exclusive lock on its own cookie store (so the profile you're actively using is the one you can't read). To work around this, the session token is cached — DPAPI-encrypted, in `usage_cache.json` — whenever the store is readable, and reused while it's locked. In practice: launch a profile at least once from this tool, and its usage stays visible whether the app is open or closed.
+
 ## Build
 
 Standalone `.exe` build via PyInstaller, for shipping to users who don't have Python:
