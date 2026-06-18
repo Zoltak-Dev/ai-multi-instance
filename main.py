@@ -263,9 +263,11 @@ def _usage_pct(value: float | None) -> str:
 
 def render_usage(results: list[usage.ProfileUsage]) -> str:
     bar = "─" * 64
+    count = len(results)
+    label = f"{count} account" if count == 1 else f"{count} accounts"
     out: list[str] = [
         "",
-        f"  {BOLD}Usage — Claude ({len(results)} account(s)){RESET}",
+        f"  {BOLD}Usage — Claude ({label}){RESET}",
         f"  {GREY}{bar}{RESET}",
         f"  {DIM}{'Profile':<10}{'Account':<30}{'5h':>6}{'7d':>7}{'Opus':>7}  Resets{RESET}",
     ]
@@ -287,6 +289,8 @@ def render_usage(results: list[usage.ProfileUsage]) -> str:
             f"  {usage.humanize_reset(r.resets_at)}"
         )
     out.append("")
+    out.append(f"  {DIM}[R] reload   [Enter] back{RESET}")
+    out.append("  > ")
     return "\n".join(out)
 
 
@@ -294,12 +298,14 @@ def action_usage(profiles: list[str]) -> None:
     if not profiles:
         ask(f"  {YELLOW}No profile.{RESET} [Enter] ")
         return
-    sys.stdout.write(f"\n  {DIM}Fetching usage…{RESET}")
-    sys.stdout.flush()
     dirs = [engine.PROFILES_DIR / name for name in profiles]
-    results = usage.fetch_all(dirs)
-    _clear_and_write(render_usage(results))
-    pause()
+    while True:
+        sys.stdout.write(f"\n  {DIM}Fetching usage…{RESET}")
+        sys.stdout.flush()
+        results = usage.fetch_all(dirs)
+        _clear_and_write(render_usage(results))
+        if ask("").lower() != "r":  # R reloads; anything else returns to the menu
+            return
 
 
 def action_toggle_login() -> None:
