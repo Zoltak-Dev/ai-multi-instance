@@ -1,10 +1,9 @@
 """Headless launcher for Claude/Codex profiles. No console window.
 
   launcher.pyw --app=<key> "<profile-name>"  -> open profile in that app
-  launcher.pyw --app=<key> "<scheme>://..."  -> OAuth callback to active profile
 
-The --app flag is added automatically by shortcuts and by the protocol
-registry handler. If absent, the URL scheme is used as a fallback.
+The --app flag is added automatically by desktop shortcuts. If absent, Claude
+is assumed.
 """
 import subprocess
 import sys
@@ -23,7 +22,7 @@ def _error(message: str, title: str = "Multi-Instance") -> None:
 
 
 def _parse_args(argv: list[str]) -> tuple[engine.App | None, list[str]]:
-    """Pop --app=<key> from argv (or default by URL scheme later). Returns (app, rest)."""
+    """Pop --app=<key> from argv. Returns (app, rest)."""
     app: engine.App | None = None
     rest: list[str] = []
     for a in argv:
@@ -38,17 +37,6 @@ def _parse_args(argv: list[str]) -> tuple[engine.App | None, list[str]]:
 
 def main() -> int:
     app, args = _parse_args(sys.argv[1:])
-
-    # Fallback: detect app from a URL scheme.
-    if app is None:
-        for a in args:
-            scheme = a.split(":", 1)[0].lower() if ":" in a else ""
-            for candidate in engine.APPS.values():
-                if scheme == candidate.protocol:
-                    app = candidate
-                    break
-            if app is not None:
-                break
     if app is None:
         app = engine.CLAUDE  # last-resort default
 
@@ -59,21 +47,6 @@ def main() -> int:
         _error(f"{app.display} not found.\nIs the desktop app installed?",
                f"{app.display} Multi-Instance")
         return 1
-
-    url = next((a for a in args if a.startswith(f"{app.protocol}://")), None)
-    if url:
-        name = engine.active_profile()
-        data_dir = engine.PROFILES_DIR / name if name else None
-        cmd = [str(exe)]
-        if data_dir is not None:
-            cmd.append(f"--user-data-dir={data_dir}")
-        cmd.append(url)
-        env = engine.profile_env(name) if name else None
-        subprocess.Popen(
-            cmd, env=env, creationflags=engine.DETACHED_FLAGS, close_fds=True,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        return 0
 
     name = args[0] if args else ""
     if not name:

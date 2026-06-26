@@ -47,13 +47,11 @@ def render(profiles: list[str]) -> str:
     app = engine.current_app()
     exe = engine.find_app_exe()
     version = engine.app_version(exe) if exe else None
-    routing = engine.login_routing_enabled()
-    active = engine.active_profile()
     bar = "─" * 52
 
     out: list[str] = []
     out.append(f"{CYAN}{bar}{RESET}")
-    out.append(f"{BOLD}  {app.display} Multi-Instance{RESET}  {DIM}[switch with 8]{RESET}")
+    out.append(f"{BOLD}  {app.display} Multi-Instance{RESET}  {DIM}[switch with 7]{RESET}")
     out.append(f"  {DIM}{CREDIT}{RESET}")
     out.append(f"{CYAN}{bar}{RESET}")
     label_app = f"{app.display} desktop".ljust(15)
@@ -61,14 +59,6 @@ def render(profiles: list[str]) -> str:
         out.append(f"  {label_app} {GREY}:{RESET} v{version}")
     else:
         out.append(f"  {label_app} {GREY}:{RESET} {RED}not found{RESET}")
-
-    state = f"{GREEN}on{RESET}" if routing else f"{GREY}off{RESET}"
-    out.append(f"  Login patch     {GREY}:{RESET} {state}")
-    if routing:
-        target = active if active else f"{YELLOW}none yet — launch a profile first{RESET}"
-        out.append(f"  {app.protocol}:// login → {GREY}:{RESET} {target}")
-    else:
-        out.append(f"  {app.protocol}:// login → {GREY}:{RESET} {DIM}default {app.display} (patch off){RESET}")
     out.append("")
 
     out.append(f"  {BOLD}Profiles ({len(profiles)}){RESET}")
@@ -81,18 +71,16 @@ def render(profiles: list[str]) -> str:
             out.append(f"    {CYAN}{i:>{width}}.{RESET} {name}{tag}")
     out.append("")
 
-    toggle_label = "Disable" if routing else "Enable"
     out.append(f"    {CYAN}1{RESET}  Launch profile(s)")
     out.append(f"    {CYAN}2{RESET}  Close profile(s)")
     out.append(f"    {CYAN}3{RESET}  Create a profile")
     out.append(f"    {CYAN}4{RESET}  Rename a profile")
     out.append(f"    {CYAN}5{RESET}  Toggle desktop shortcut")
     out.append(f"    {CYAN}6{RESET}  Delete profile(s)")
-    out.append(f"    {CYAN}7{RESET}  {toggle_label} login patch")
     other = engine.CODEX if engine.current_app() is engine.CLAUDE else engine.CLAUDE
-    out.append(f"    {CYAN}8{RESET}  Switch to {other.display}")
+    out.append(f"    {CYAN}7{RESET}  Switch to {other.display}")
     if app is engine.CLAUDE:
-        out.append(f"    {CYAN}9{RESET}  Usage (all accounts)")
+        out.append(f"    {CYAN}8{RESET}  Usage (all accounts)")
     out.append(f"    {CYAN}0{RESET}  Quit")
     out.append("")
     out.append(f"  {DIM}Tip: multi-select with spaces, e.g. '1 3 5'{RESET}")
@@ -308,16 +296,6 @@ def action_usage(profiles: list[str]) -> None:
             return
 
 
-def action_toggle_login() -> None:
-    try:
-        if engine.login_routing_enabled():
-            engine.disable_login_routing()
-        else:
-            engine.enable_login_routing()
-    except OSError as e:
-        pause(f"  {RED}Registry error: {e}{RESET}  ")
-
-
 # --- Main loop ------------------------------------------------------------ #
 def loop() -> None:
     while True:
@@ -337,11 +315,9 @@ def loop() -> None:
         elif choice == "6":
             action_delete(profiles)
         elif choice == "7":
-            action_toggle_login()
-        elif choice == "8":
             other = engine.CODEX if engine.current_app() is engine.CLAUDE else engine.CLAUDE
             engine.set_app(other)
-        elif choice == "9" and engine.current_app() is engine.CLAUDE:
+        elif choice == "8" and engine.current_app() is engine.CLAUDE:
             action_usage(profiles)
         elif choice == "0":
             return
