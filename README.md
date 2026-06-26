@@ -4,7 +4,7 @@ Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **
 
 ![Claude / Codex Multi-Instance preview](https://github.com/user-attachments/assets/12574118-ea86-4305-a50d-f1e4d7bca09b)
 
-Press `8` to switch between Claude and Codex. Profiles, shortcuts, and protocol handlers (`claude://` / `codex://`) are managed independently for each app.
+Press `7` to switch between Claude and Codex. Profiles and shortcuts are managed independently for each app.
 
 ## Install
 
@@ -54,19 +54,9 @@ The Claude desktop app respects Chromium's standard `--user-data-dir` flag: diff
 
 Codex behaves differently. Its `bootstrap.js` calls `app.setPath('userData', ...)` to a hardcoded path **before** `app.requestSingleInstanceLock()`, so the CLI flag never reaches the singleton check and any second launch exits immediately.
 
-## OAuth login patch
-
-Optional, toggled from the menu (`7`), and managed independently for each app. Claude uses the `claude://` protocol, while Codex uses `codex://`.
-
-When enabled, OAuth callbacks (Google for Claude, OpenAI for Codex) are routed to the last profile launched for the corresponding app, instead of whichever installation currently owns the protocol handler.
-
-It works by registering this tool as the `claude://` / `codex://` handler in `HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\<scheme>`, with a valid Windows `UserChoice` hash so the desktop app can't silently reclaim the registration on its next launch. Disable it from the menu to revert.
-
-The patch is a registry entry, so it stays active after you close the menu.
-
 ## Usage tracker
 
-Claude only, from the menu (`9`). Shows each account's current limits side by side — 5-hour session, 7-day weekly (and Opus), plus when each resets:
+Claude only, from the menu (`8`). Shows each account's current limits side by side — 5-hour session, 7-day weekly (and Opus), plus when each resets:
 
 ```
   Profile   Account                 5h     7d   Opus  Resets
@@ -88,7 +78,7 @@ pyinstaller --onefile --console --name ai-multi-instance --clean --noconfirm mai
 pyinstaller --onefile --noconsole --name launcher --clean --noconfirm launcher.pyw
 ```
 
-The two binaries land in `dist/`. Ship them in the same folder — `ai-multi-instance.exe` looks for `launcher.exe` next to itself to manage desktop shortcuts and protocol handlers for both Claude and Codex.
+The two binaries land in `dist/`. Ship them in the same folder — `ai-multi-instance.exe` looks for `launcher.exe` next to itself to manage desktop shortcuts for both Claude and Codex.
 
 Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/ai-multi-instance/releases).
 

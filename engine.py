@@ -15,8 +15,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import _userchoice as uc
-
 
 @dataclass(frozen=True)
 class App:
@@ -26,8 +24,6 @@ class App:
     publisher_hash: str    # WindowsApps fallback suffix
     package_prefix: str    # WindowsApps folder prefix, e.g. "Claude_" or "OpenAI.Codex_"
     exe_name: str          # filename inside <pkg>/app/
-    protocol: str          # URL scheme for OAuth callbacks
-    progid: str            # registry ProgID for protocol routing
     profiles_dirname: str
     # Optional per-profile env overrides. Used when the app stores state
     # outside the Chromium --user-data-dir (e.g. Codex's ~/.codex/auth.json)
@@ -42,14 +38,12 @@ CLAUDE = App(
     key="claude", display="Claude",
     package_filter="*Claude*", publisher_hash="pzs8sxrjxfjjc",
     package_prefix="Claude_", exe_name="claude.exe",
-    protocol="claude", progid="ClaudeMultiInstance",
     profiles_dirname="ClaudeProfiles",
 )
 CODEX = App(
     key="codex", display="Codex",
     package_filter="*Codex*", publisher_hash="2p2nqsd0c76g0",
     package_prefix="OpenAI.Codex_", exe_name="Codex.exe",
-    protocol="codex", progid="CodexMultiInstance",
     profiles_dirname="CodexProfiles",
     env_overrides=(
         # CLI auth (~/.codex/auth.json) — keeps OpenAI sign-in per profile.
@@ -83,9 +77,7 @@ STATE_FILE = PROJECT_DIR / "state.json"
 
 
 # --- Consolidated state (state.json) -------------------------------------- #
-# Schema:
-#   { "selected_app": "claude"|"codex",
-#     "active_profiles": { "claude": "<name>", "codex": "<name>" } }
+# Schema:  { "selected_app": "claude"|"codex" }
 def _load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -98,16 +90,6 @@ def _save_state(state: dict) -> None:
         STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except OSError:
         pass
-
-
-def _set_active(app_key: str, profile: str | None) -> None:
-    state = _load_state()
-    active = state.setdefault("active_profiles", {})
-    if profile is None:
-        active.pop(app_key, None)
-    else:
-        active[app_key] = profile
-    _save_state(state)
 
 
 # Current app (mutable via set_app). PROFILES_DIR mirrors it for cleaner reads.
@@ -239,8 +221,6 @@ def delete_profile(name: str) -> None:
             shutil.rmtree(profile, onexc=_force_rw)
         else:
             shutil.rmtree(profile, onerror=_force_rw)
-    if active_profile() == name:
-        _set_active(_current.key, None)
 
 
 def rename_profile(old: str, new: str) -> None:
@@ -259,18 +239,6 @@ def rename_profile(old: str, new: str) -> None:
     if shortcut_exists(old):
         delete_shortcut(old)
         create_shortcut(new)
-
-    if active_profile() == old:
-        _set_active(_current.key, new)
-
-
-def active_profile() -> str:
-    name = _load_state().get("active_profiles", {}).get(_current.key, "")
-    if not isinstance(name, str) or not name:
-        return ""
-    if not (PROFILES_DIR / name).is_dir():
-        return ""
-    return name
 
 
 # --- Running processes ---------------------------------------------------- #
@@ -353,7 +321,6 @@ def launch_profile(name: str, exe: Path | None = None) -> None:
         raise RuntimeError(f"{_current.display} not found. Is the desktop app installed?")
     data_dir = PROFILES_DIR / name
     data_dir.mkdir(parents=True, exist_ok=True)
-    _set_active(_current.key, name)
     subprocess.Popen(
         [str(exe), f"--user-data-dir={data_dir}"],
         env=profile_env(name),
@@ -436,20 +403,3 @@ def delete_shortcut(name: str) -> bool:
         return True
     except OSError:
         return False
-
-
-# --- Login routing (claude://, codex:// -> active profile of that app) ---- #
-def login_routing_enabled() -> bool:
-    return uc.current_default(_current.protocol) == _current.progid
-
-
-def enable_login_routing() -> None:
-    target, args = _launcher_invocation("%1")
-    command = f'"{target}" {args}'
-    friendly = f"URL:{_current.display} Multi-Instance"
-    uc.register_progid(_current.progid, command, friendly=friendly)
-    uc.set_protocol_default(_current.protocol, _current.progid)
-
-
-def disable_login_routing() -> None:
-    uc.clear_protocol_default(_current.protocol)
