@@ -1,10 +1,15 @@
-"""Per-account Claude usage tracking — zero third-party dependencies.
+"""Per-account usage tracking for Claude and Codex — zero third-party deps.
 
 For each Claude profile we read the session cookie straight from that profile's
 Chromium cookie store (``ClaudeProfiles/<name>/Network/Cookies``), decrypt it,
 and query the official claude.ai usage endpoint. Because every profile is an
 isolated ``--user-data-dir``, each account's session lives in its own store, so
 usage is reported per account with no cross-talk.
+
+Codex is simpler: each profile stores its ChatGPT OAuth tokens in a plain file
+(``CodexProfiles/<name>/.codex/auth.json``), and the ``codex/usage`` endpoint
+returns the rolling-window percentages directly — see the "Codex API" section.
+``fetch_all(dirs, app)`` dispatches to the right backend.
 
 Decryption uses Windows DPAPI (``crypt32``) for the master key and AES-256-GCM
 via CNG/BCrypt (``bcrypt.dll``) for the cookie values — all through ``ctypes``,
@@ -40,8 +45,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import POINTER, byref, c_char_p, c_ubyte, c_void_p, cast, create_string_buffer, sizeof
 from ctypes import wintypes
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import engine  # single source of truth for PROJECT_DIR (no import cycle)
@@ -309,7 +314,7 @@ def _read_session(profile_dir: Path) -> tuple[str, str | None, str | None]:
 
 # --- Claude API ------------------------------------------------------------ #
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+       "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 _ORGS_URL = "https://claude.ai/api/organizations"
 _USAGE_URL = "https://claude.ai/api/organizations/{org}/usage"
 
@@ -346,19 +351,28 @@ def _utilization(node) -> float | None:
 
 @dataclass
 class ProfileUsage:
-    """Usage snapshot for one profile. ``ok`` False means ``error`` explains why."""
+    """Usage snapshot for one profile. ``ok`` False means ``error`` explains why.
+    ``rows`` is the ordered list of limits to display — rolling windows first
+    (labelled by length: '5h', '7d', or Codex Free's '30d'), then per-model
+    weekly breakdowns (Claude's 'Fable', etc.). Each row carries its OWN reset
+    time. Only what the account actually reports is listed."""
     name: str
     ok: bool = False
     error: str = ""
     account: str = ""
-    five_hour: float | None = None
-    seven_day: float | None = None
-    seven_day_opus: float | None = None
-    resets_at: str = ""
+    rows: list[tuple[str, float, str]] = field(default_factory=list)  # (label, pct, reset_iso)
 
 
-def fetch_usage(profile_dir: Path) -> ProfileUsage:
-    name = profile_dir.name
+def _window_label(seconds) -> str:
+    """'5h' / '7d' / '30d' from a window length in seconds."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{s // 86400}d" if s >= 86400 else f"{s // 3600}h"
+
+
+def _fetch_claude(name: str, profile_dir: Path) -> ProfileUsage:
     res = ProfileUsage(name=name)
 
     status, session, cf = _read_session(profile_dir)
@@ -377,11 +391,18 @@ def fetch_usage(profile_dir: Path) -> ProfileUsage:
         res.account = _account_label(org.get("name", ""))
         org_id = org.get("uuid") or org.get("id")
         data = _api_get(_USAGE_URL.format(org=org_id), cookie_header)
-        res.five_hour = _utilization(data.get("five_hour"))
-        seven = data.get("seven_day") or {}
-        res.seven_day = _utilization(seven)
-        res.resets_at = seven.get("resets_at") or ""
-        res.seven_day_opus = _utilization(data.get("seven_day_opus"))
+        for label, key in (("5h", "five_hour"), ("7d", "seven_day")):
+            node = data.get(key) or {}
+            pct = _utilization(node)
+            if pct is not None:
+                res.rows.append((label, pct, node.get("resets_at") or ""))
+        for lim in data.get("limits") or []:  # per-model weekly (Fable, Opus…)
+            if lim.get("kind") != "weekly_scoped":
+                continue
+            model = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+            pct = lim.get("percent")
+            if model and pct is not None:
+                res.rows.append((model, float(pct), lim.get("resets_at") or ""))
         res.ok = True
     except urllib.error.HTTPError as exc:
         res.error = {401: "session expired", 403: "blocked (Cloudflare)",
@@ -395,13 +416,99 @@ def fetch_usage(profile_dir: Path) -> ProfileUsage:
     return res
 
 
-def fetch_all(profile_dirs: list[Path]) -> list[ProfileUsage]:
-    """Fetch usage for every profile in parallel (network-bound), order preserved."""
-    if not profile_dirs:
+# --- Codex API ------------------------------------------------------------- #
+# Codex signs in with ChatGPT (OAuth). Each profile keeps its own tokens in
+# <profile>/.codex/auth.json (CODEX_HOME). The backend exposes a clean usage
+# endpoint — no quota spent, per-account — with a primary and (on paid plans) a
+# secondary rolling window, each as used-percent. Window lengths vary by plan
+# (Plus: 5h + 7d; Free: a single 30-day window), so we label them by duration.
+_CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+
+
+def _codex_get(url: str, access_token: str, account_id: str, timeout: float = 20.0):
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": _UA,
+        "Accept": "*/*",
+        "chatgpt-account-id": account_id or "",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _epoch_to_iso(ts) -> str:
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _fetch_codex(name: str, profile_dir: Path) -> ProfileUsage:
+    res = ProfileUsage(name=name)
+    auth = profile_dir / ".codex" / "auth.json"
+    if not auth.is_file():
+        res.error = "not signed in"
+        return res
+    try:
+        tokens = (json.loads(auth.read_text("utf-8")) or {}).get("tokens") or {}
+    except (OSError, ValueError):
+        res.error = "not signed in"
+        return res
+    access, account_id = tokens.get("access_token"), tokens.get("account_id")
+    if not access:
+        res.error = "not signed in"
+        return res
+    try:
+        data = _codex_get(_CODEX_USAGE_URL, access, account_id)
+        res.account = data.get("email") or "—"
+        rl = data.get("rate_limit") or {}
+        for win in (rl.get("primary_window"), rl.get("secondary_window")):
+            if not win or win.get("used_percent") is None:
+                continue
+            label = _window_label(win.get("limit_window_seconds"))
+            res.rows.append((label, win["used_percent"], _epoch_to_iso(win.get("reset_at"))))
+        res.ok = True
+    except urllib.error.HTTPError as exc:
+        res.error = {401: "expired — open Codex once", 403: "forbidden",
+                     429: "rate-limited"}.get(exc.code, f"HTTP {exc.code}")
+    except urllib.error.URLError:
+        res.error = "network unavailable"
+    except (OSError, ValueError, KeyError) as exc:
+        res.error = exc.__class__.__name__
+    return res
+
+
+def session_snapshot(profile_dir: Path) -> dict:
+    """Diagnostic for the sign-in flow: which auth material is present and
+    readable in a profile. ``{"sessionKey": bool, "oauth": bool}``. The web UI
+    needs the ``sessionKey`` cookie; the OAuth token in ``config.json`` is
+    written synchronously and survives on its own. The cookie store must be
+    unlocked (no running instance) for ``sessionKey`` to read true."""
+    has_sk = False
+    try:
+        has_sk = bool(_read_claude_cookies(profile_dir).get("sessionKey"))
+    except (sqlite3.Error, OSError):
+        pass
+    has_oauth = False
+    try:
+        cfg = json.loads((profile_dir / "config.json").read_text("utf-8"))
+        has_oauth = bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
+    except (OSError, ValueError):
+        pass
+    return {"sessionKey": has_sk, "oauth": has_oauth}
+
+
+def fetch_all(targets: list[tuple[str, Path]], app: str = "claude") -> list[ProfileUsage]:
+    """Fetch usage for every ``(display_name, dir)`` target in parallel
+    (network-bound), order preserved. ``app`` selects the backend: ``"claude"``
+    (cookie + claude.ai) or ``"codex"`` (ChatGPT OAuth token + codex/usage). The
+    explicit name lets the main instance show up under a friendly label."""
+    if not targets:
         return []
-    workers = min(8, len(profile_dirs))
+    fetch = _fetch_codex if app == "codex" else _fetch_claude
+    workers = min(8, len(targets))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(fetch_usage, profile_dirs))
+        return list(pool.map(lambda t: fetch(t[0], t[1]), targets))
 
 
 # --- Formatting helpers (consumed by the UI layer) ------------------------- #

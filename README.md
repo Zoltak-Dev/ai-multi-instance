@@ -4,7 +4,7 @@ Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **
 
 ![Claude / Codex Multi-Instance preview](https://github.com/user-attachments/assets/01e0c061-2441-4a37-92f0-a4d22ae76d18)
 
-Press `7` to switch between Claude and Codex. Profiles and shortcuts are managed independently for each app.
+The interface is arrow-key driven: move the highlight with `↑`/`↓`, then press a digit for an action (`1` launch, `2` sign-in, `3` close, `4` rename, `5` shortcut, `6` delete, `7` new, `8` switch app, `9` usage, `0` quit). Because rows are picked with the arrows and never by number, a digit is always an action — no ambiguity. Press `Space` to tick several profiles and act on them at once. The list's first row is always the **main instance** (your normal Claude, launched without a profile) so you can launch or close it from here too; the running/idle state refreshes on its own. The accent colour follows the app — Claude's orange, Codex's blue.
 
 ## Install
 
@@ -35,9 +35,9 @@ https://github.com/user-attachments/assets/eb0052db-64ee-4ddc-8155-e5b9d92ca40d
 
 ## Usage
 
-The menu is numbered. Pick an action, then pick a profile by its number. For actions that support it, you can pass several numbers separated by spaces (`1 3 5`) to run on multiple profiles at once.
+Move the highlight with `↑`/`↓` and press a digit for the action — rows are never typed by number. `Space` ticks a profile so an action (launch, close, shortcut, delete) can run on several at once. The top row, **main instance**, is your normal single-account Claude; only launch/close apply to it.
 
-Creating a profile also creates a desktop shortcut. Double-click the shortcut to launch that profile directly without opening the menu.
+Creating a profile (`7`) also creates a desktop shortcut and offers to sign the profile in right away (see below). Double-click the shortcut to launch that profile directly without opening the menu.
 
 Profiles live in their own folders, kept fully separate per app:
 
@@ -54,19 +54,43 @@ The Claude desktop app respects Chromium's standard `--user-data-dir` flag: diff
 
 Codex behaves differently. Its `bootstrap.js` calls `app.setPath('userData', ...)` to a hardcoded path **before** `app.requestSingleInstanceLock()`, so the CLI flag never reaches the singleton check and any second launch exits immediately.
 
+## Signing in to a profile
+
+A profile instance can never complete a sign-in on its own: the sign-in callback (`claude://…` — email magic link or Google OAuth alike) is delivered by Windows to the MSIX package, which always activates the **default** app instance, never a profile. Redirecting the protocol per profile is not possible on current Windows — the UCPD driver ignores programmatic `UserChoice` registry writes, and MSIX protocol activation bypasses the registry entirely.
+
+(A subtlety: the default instance thinks its data lives in `%APPDATA%\Claude`, but MSIX filesystem virtualization redirects it to `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude` — that folder is what actually gets moved around below.)
+
+The tool works around this with a snapshot flow (press `2`, Claude only — also offered right after creating a profile):
+
+1. Your main Claude data is stashed aside, and a fresh default Claude opens.
+2. Sign in there with the account you want. Email and Google both work, since this is the real default app receiving the callback.
+3. That's it — **no key to press**. The tool detects the sign-in on its own, captures the session, and puts your main data back. Press `q` at any point to cancel and restore.
+
+How the detection works: the app is "logged in" when a `sessionKey` cookie is present (the OAuth token in `config.json` is derived from it). The cookie store is locked while the app runs, so the tool can't read it live — instead it watches `config.json` (a plain file, readable live) for the token to appear, then waits for Chromium to flush the cookie to disk, and only then captures. If you close the tool mid sign-in, it detects the interrupted state on next launch and offers to restore or drop the set-aside session.
+
+Windows DPAPI encryption is scoped to the Windows user, not to the folder, so the moved session stays valid. Nothing is patched or hijacked.
+
 ## Usage tracker
 
-Claude only, from the menu (`8`). Shows each account's current limits side by side — 5-hour session, 7-day weekly (and Opus), plus when each resets:
+Press `9` (works for both Claude and Codex). Each account — the main instance included — gets a block listing every limit it has, with its **own** reset time:
 
 ```
-  Profile   Account                 5h     7d   Opus  Resets
-  work      you@example.com         0%    11%    n/a  in 1d 17h
-  perso     other@example.com       0%    10%    n/a  in 4d 12h
+  Main instance   you@example.com
+     5h      39%   resets in 3h
+     7d       9%   resets in 6d 18h
+     Fable     5%   resets in 6d 18h
+
+  perso           other@example.com
+     5h      95%   resets in 1h
+     7d      71%   resets in 4d 12h
 ```
 
-It reads each profile's claude.ai session straight from that profile's own cookie store and queries the official `claude.ai/api/.../usage` endpoint — per account, no logins required, with no third-party dependencies (DPAPI + AES-GCM via Windows CNG through `ctypes`).
+The rows adapt to the account: whatever rolling windows it exposes (`5h`, `7d`, or a Free plan's `30d`) followed by any per-model weekly breakdowns (Claude's `Fable`, etc.). Nothing placeholder is shown — a row appears only if the account actually reports it.
 
-A running instance holds an exclusive lock on its own cookie store (so the profile you're actively using is the one you can't read). To work around this, the session token is cached — DPAPI-encrypted, in `usage_cache.json` — whenever the store is readable, and reused while it's locked. In practice: launch a profile at least once from this tool, and its usage stays visible whether the app is open or closed.
+- **Claude** reads each profile's claude.ai session straight from its own cookie store and queries the official `claude.ai/api/.../usage` endpoint (DPAPI + AES-GCM via Windows CNG through `ctypes`). A running instance holds an exclusive lock on its cookie store, so the session token is cached (DPAPI-encrypted, in `usage_cache.json`) whenever readable and reused while locked — launch a profile once and its usage stays visible whether the app is open or closed.
+- **Codex** reads each profile's ChatGPT token from `<profile>/.codex/auth.json` and queries the `codex/usage` endpoint — no quota spent.
+
+Both are per account, need no extra logins, and use only the Python standard library.
 
 ## Build
 

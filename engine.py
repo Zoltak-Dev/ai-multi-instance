@@ -6,12 +6,14 @@ State lives next to this file:
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +34,12 @@ class App:
     # its singleton check so different values yield separate instances).
     # Format: tuple of (env_var_name, relative_subpath_under_profile_dir).
     env_overrides: tuple[tuple[str, str], ...] = ()
+    # Logical userData folder name of the app's DEFAULT instance (no
+    # --user-data-dir). That default slot is the only place the app's
+    # protocol sign-in callback (claude://…) can ever land — see the
+    # "Default-slot sign-in" section for where it REALLY lives on disk.
+    # Empty = snapshot sign-in unsupported.
+    userdata_dirname: str = ""
 
 
 CLAUDE = App(
@@ -39,6 +47,7 @@ CLAUDE = App(
     package_filter="*Claude*", publisher_hash="pzs8sxrjxfjjc",
     package_prefix="Claude_", exe_name="claude.exe",
     profiles_dirname="ClaudeProfiles",
+    userdata_dirname="Claude",
 )
 CODEX = App(
     key="codex", display="Codex",
@@ -207,6 +216,14 @@ def _force_rw(func, path, _exc):
         pass
 
 
+def _rmtree(path: Path) -> None:
+    # onexc replaces onerror in 3.12+; pass both for portability.
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_force_rw)
+    else:
+        shutil.rmtree(path, onerror=_force_rw)
+
+
 def delete_profile(name: str) -> None:
     profile = PROFILES_DIR / name
     lnk = desktop_dir() / shortcut_filename(name)
@@ -216,11 +233,7 @@ def delete_profile(name: str) -> None:
         except OSError:
             pass
     if profile.exists():
-        # onexc replaces onerror in 3.12+; pass both for portability.
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(profile, onexc=_force_rw)
-        else:
-            shutil.rmtree(profile, onerror=_force_rw)
+        _rmtree(profile)
 
 
 def rename_profile(old: str, new: str) -> None:
@@ -242,31 +255,52 @@ def rename_profile(old: str, new: str) -> None:
 
 
 # --- Running processes ---------------------------------------------------- #
-def running_profiles() -> dict[str, list[int]]:
-    """Return {profile_name: [pids]} for processes of the current app using
-    one of our --user-data-dir paths."""
-    exe_name = _current.exe_name
+def _processes(exe_name: str) -> list[tuple[int, str, str]]:
+    """Return (pid, executable path, command line) for every running process
+    named `exe_name`."""
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              f"Get-CimInstance Win32_Process -Filter \"Name='{exe_name}'\" "
-             "| ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }"],
+             "| ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)|$($_.CommandLine)\" }"],
             capture_output=True, text=True, timeout=10, creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return []
+    procs: list[tuple[int, str, str]] = []
+    for line in out.stdout.splitlines():
+        pid_str, sep, rest = line.partition("|")
+        pid_str = pid_str.strip()
+        if not sep or not pid_str.isdigit():
+            continue
+        exe_path, _, cmd = rest.partition("|")
+        procs.append((int(pid_str), exe_path, cmd))
+    return procs
 
+
+def _kill_pids(pids: list[int]) -> int:
+    killed = 0
+    for pid in pids:
+        try:
+            r = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True, timeout=10, creationflags=NO_WINDOW,
+            )
+            if r.returncode == 0:
+                killed += 1
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return killed
+
+
+def running_profiles() -> dict[str, list[int]]:
+    """Return {profile_name: [pids]} for processes of the current app using
+    one of our --user-data-dir paths."""
     result: dict[str, list[int]] = {}
     flag = "--user-data-dir="
     profiles_root = str(PROFILES_DIR).lower()
 
-    for line in out.stdout.splitlines():
-        if "|" not in line:
-            continue
-        pid_str, _, cmd = line.partition("|")
-        pid_str = pid_str.strip()
-        if not pid_str.isdigit():
-            continue
+    for pid, _exe, cmd in _processes(_current.exe_name):
         idx = cmd.lower().find(flag)
         if idx == -1:
             continue
@@ -283,24 +317,12 @@ def running_profiles() -> dict[str, list[int]]:
             continue
         if parent != profiles_root:
             continue
-        result.setdefault(Path(path_str).name, []).append(int(pid_str))
+        result.setdefault(Path(path_str).name, []).append(pid)
     return result
 
 
 def close_profile(name: str) -> int:
-    pids = running_profiles().get(name, [])
-    killed = 0
-    for pid in pids:
-        try:
-            r = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True, timeout=10, creationflags=NO_WINDOW,
-            )
-            if r.returncode == 0:
-                killed += 1
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return killed
+    return _kill_pids(running_profiles().get(name, []))
 
 
 def profile_env(name: str) -> dict[str, str]:
@@ -327,6 +349,202 @@ def launch_profile(name: str, exe: Path | None = None) -> None:
         creationflags=DETACHED_FLAGS, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+
+
+# --- Default-slot sign-in (snapshot model) --------------------------------- #
+# The MSIX package owns the app's protocol (claude://…): every sign-in
+# callback — email magic link or OAuth — lands in the instance launched
+# WITHOUT --user-data-dir (the "default slot"). Redirecting the protocol per
+# profile is impossible on current Windows: the UCPD driver ignores
+# programmatic UserChoice writes and MSIX protocol activation bypasses the
+# registry entirely. So profiles get signed in by snapshot instead: stash the
+# default slot aside, let the user sign in there (the callback works, it's
+# the real default app), move the freshly signed-in state into the profile,
+# restore the stash. DPAPI blobs are scoped to the Windows user, not to the
+# folder, so the moved state stays fully readable — usage.py already relies
+# on exactly that.
+#
+# WHERE the default slot really lives: the packaged app THINKS its userData
+# is %APPDATA%\<userdata_dirname>, but MSIX filesystem virtualization
+# redirects every access to the package's LocalCache. Verified empirically:
+# the plain %APPDATA%\Claude does not even exist outside the container —
+# the real signed-in state sits in
+#   %LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\<userdata_dirname>
+# and that path is what this tool (running OUTSIDE the container) must move.
+
+BACKUP_SUFFIX = ".mi-backup"
+
+
+def default_slot_dir(app: App | None = None) -> Path | None:
+    """Real on-disk userData dir of the app's DEFAULT instance — the only dir
+    that can receive the sign-in callback. None when the app has no snapshot
+    support."""
+    app = app or _current
+    if not app.userdata_dirname:
+        return None
+    # MSIX install: state is virtualized into the package's LocalCache.
+    # PackageFamilyName is <Name>_<publisher hash> = package_prefix + hash.
+    local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    pkg_root = Path(local) / "Packages" / (app.package_prefix + app.publisher_hash)
+    if pkg_root.is_dir():
+        return pkg_root / "LocalCache" / "Roaming" / app.userdata_dirname
+    # Unpackaged install: the plain %APPDATA% path is the real one.
+    appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return Path(appdata) / app.userdata_dirname
+
+
+def supports_login_snapshot(app: App | None = None) -> bool:
+    return default_slot_dir(app) is not None
+
+
+def backup_dir(app: App | None = None) -> Path | None:
+    slot = default_slot_dir(app)
+    return slot.with_name(slot.name + BACKUP_SUFFIX) if slot else None
+
+
+def _is_packaged_exe(exe_path: str, app: App) -> bool:
+    """True when `exe_path` is the MSIX desktop app's own binary. Other
+    programs share the exe name — Claude Code's CLI is also claude.exe — so
+    matching on the name alone would kill unrelated processes. The packaged
+    binary always sits at <pkg>\\app\\<exe> under a <package_prefix>* folder,
+    whatever the version."""
+    p = Path(exe_path.strip())
+    try:
+        return (p.name.lower() == app.exe_name.lower()
+                and p.parent.name.lower() == "app"
+                and p.parent.parent.name.startswith(app.package_prefix))
+    except OSError:
+        return False
+
+
+def default_slot_pids() -> list[int]:
+    """Main processes of the desktop app running on the default slot: the
+    packaged exe itself, with no --user-data-dir (so %APPDATA% state) and no
+    --type= (Chromium children)."""
+    pids: list[int] = []
+    for pid, exe_path, cmd in _processes(_current.exe_name):
+        if not _is_packaged_exe(exe_path, _current):
+            continue
+        low = cmd.lower()
+        if "--user-data-dir=" not in low and "--type=" not in low:
+            pids.append(pid)
+    return pids
+
+
+def close_default_slot(*, wait: float = 0.0) -> int:
+    """Force-kill the default-slot processes. When `wait` > 0, block until they
+    are actually gone (or the timeout elapses) so the folder can be moved."""
+    n = _kill_pids(default_slot_pids())
+    if wait > 0:
+        deadline = time.monotonic() + wait
+        while default_slot_pids() and time.monotonic() < deadline:
+            time.sleep(0.5)
+    return n
+
+
+def default_slot_running() -> bool:
+    return bool(default_slot_pids())
+
+
+def launch_default_slot(exe: Path | None = None) -> None:
+    """Launch the app on its default slot (no --user-data-dir)."""
+    exe = exe or find_app_exe()
+    if exe is None:
+        raise RuntimeError(f"{_current.display} not found. Is the desktop app installed?")
+    subprocess.Popen(
+        [str(exe)],
+        creationflags=DETACHED_FLAGS, close_fds=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _move_retry(src: Path, dst: Path, timeout: float = 15.0) -> None:
+    """Rename with retries — file locks linger a few seconds after taskkill.
+    Falls back to copy+delete when src and dst sit on different volumes."""
+    if dst.exists():
+        raise FileExistsError(f"Destination already exists: {dst}")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+        except OSError as exc:
+            if exc.errno == errno.EXDEV:
+                shutil.move(str(src), str(dst))
+                return
+            raise
+
+
+def _rmtree_retry(path: Path, timeout: float = 15.0) -> None:
+    """Delete a tree, retrying while file handles from a just-killed process
+    are still being released. Raises only if the tree survives the timeout."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            _rmtree(path)
+        except OSError:
+            pass
+        if not path.exists():
+            return
+        if time.monotonic() >= deadline:
+            raise OSError(f"Could not remove {path} — files still in use.")
+        time.sleep(0.5)
+
+
+def stash_default_slot() -> bool:
+    """Move the default slot aside before a fresh sign-in. False = nothing
+    to stash (the user had no default-slot state). Refuses to clobber an
+    existing backup — that would destroy a previously stashed main session."""
+    slot, backup = default_slot_dir(), backup_dir()
+    if backup is not None and backup.is_dir():
+        raise RuntimeError("A stashed session already exists; refusing to overwrite it.")
+    if slot is None or not slot.is_dir():
+        return False
+    _move_retry(slot, backup)
+    return True
+
+
+def restore_default_slot() -> None:
+    """Bring the stashed main session back, discarding whatever the sign-in flow
+    left in the default location. No-op when there is no stash. The caller MUST
+    have killed the fresh instance first, or the slot's files stay locked. The
+    backup is never removed until it is safely renamed into place, so a failure
+    here leaves the main session intact on disk for recovery."""
+    slot, backup = default_slot_dir(), backup_dir()
+    if backup is None or not backup.is_dir():
+        return
+    if slot.is_dir():
+        _rmtree_retry(slot)  # the throwaway fresh session; raises if still locked
+    _move_retry(backup, slot)
+
+
+def has_orphan_backup() -> bool:
+    """A leftover stash means a previous sign-in flow was interrupted."""
+    backup = backup_dir()
+    return backup is not None and backup.is_dir()
+
+
+def discard_backup() -> None:
+    backup = backup_dir()
+    if backup is not None and backup.is_dir():
+        _rmtree(backup)
+
+
+def adopt_default_into(name: str) -> None:
+    """Move the default slot's signed-in state into profile `name`,
+    replacing whatever the profile held before."""
+    slot = default_slot_dir()
+    if slot is None or not slot.is_dir():
+        raise RuntimeError("No default-slot state to adopt.")
+    profile = PROFILES_DIR / name
+    if profile.exists():
+        _rmtree_retry(profile)
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    _move_retry(slot, profile)
 
 
 # --- Desktop shortcuts ---------------------------------------------------- #
