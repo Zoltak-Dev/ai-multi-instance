@@ -2,7 +2,7 @@
 
 Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **and** the [Codex desktop app](https://chatgpt.com/codex) on Windows. The official clients only support one account at a time. This tool launches each app with a dedicated profile directory per account, allowing several accounts to run side by side and be switched instantly.
 
-![Claude / Codex Multi-Instance preview](https://github.com/user-attachments/assets/01e0c061-2441-4a37-92f0-a4d22ae76d18)
+![Claude / Codex Multi-Instance preview](https://github.com/user-attachments/assets/3c8f5415-9795-490f-a177-153f42b21f44)
 
 The interface is arrow-key driven: move the highlight with `↑`/`↓`, then press a digit for an action (`1` launch, `2` sign-in, `3` close, `4` rename, `5` shortcut, `6` delete, `7` new, `8` switch app, `9` usage, `0` quit). Because rows are picked with the arrows and never by number, a digit is always an action — no ambiguity. Press `Space` to tick several profiles and act on them at once. The list's first row is always the **main instance** (your normal Claude, launched without a profile) so you can launch or close it from here too; the running/idle state refreshes on its own. The accent colour follows the app — Claude's orange, Codex's blue.
 
@@ -22,9 +22,11 @@ No `pip install` — the project uses only the Python standard library.
 
 **Pre-built binary (no Python required)** — download `ai-multi-instance-vX.Y.Z-windows.zip` from [Releases](https://github.com/Zoltak-Dev/ai-multi-instance/releases), unzip both `.exe` files in the same folder, and run `ai-multi-instance.exe`.
 
-📹 **Video walkthrough** — installing the binary and disabling Smart App Control:
+📹 **Video walkthrough** — Disable Smart App Control:
 
-https://github.com/user-attachments/assets/eb0052db-64ee-4ddc-8155-e5b9d92ca40d
+https://github.com/user-attachments/assets/a46521fc-482f-4d55-9375-8c0cc38c79f0
+
+
 
 > ⚠️ **Windows blocks unsigned binaries by default.** Windows refuses to run any `.exe` without a code-signing certificate (which costs 300-600 €/year — not viable for a free project). To run the `.exe`:
 >
@@ -75,14 +77,16 @@ Windows DPAPI encryption is scoped to the Windows user, not to the folder, so th
 Press `9` (works for both Claude and Codex). Each account — the main instance included — gets a block listing every limit it has, with its **own** reset time:
 
 ```
-  Main instance   you@example.com
-     5h      39%   resets in 3h
-     7d       9%   resets in 6d 18h
-     Fable     5%   resets in 6d 18h
+  ◆ Usage   Claude · 3 accounts
 
-  perso           other@example.com
-     5h      95%   resets in 1h
-     7d      71%   resets in 4d 12h
+  Main instance   you@example.com
+     5h      78%   resets in 2h
+     7d      13%   resets in 6d 17h
+     Fable    5%   resets in 6d 17h
+
+  profilename2   other@example.com
+     5h       0%
+     7d       0%
 ```
 
 The rows adapt to the account: whatever rolling windows it exposes (`5h`, `7d`, or a Free plan's `30d`) followed by any per-model weekly breakdowns (Claude's `Fable`, etc.). Nothing placeholder is shown — a row appears only if the account actually reports it.
