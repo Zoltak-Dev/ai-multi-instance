@@ -77,7 +77,7 @@ Windows DPAPI encryption is scoped to the Windows user, not to the folder, so th
 Press `9` (works for both Claude and Codex). Each account — the main instance included — gets a block listing every limit it has, with its **own** reset time:
 
 ```
-  ◆ Usage   Claude · 3 accounts
+  ◆ Usage   Claude · 2 accounts
 
   Main instance   you@example.com
      5h      78%   resets in 2h
