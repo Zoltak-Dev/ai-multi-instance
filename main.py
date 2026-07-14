@@ -399,10 +399,9 @@ def do_switch(state: State) -> None:
 # "Signed in" (verified in the app's own code) = a `sessionKey` cookie exists in
 # Network/Cookies; the OAuth token in config.json is derived from it. Chromium
 # holds a freshly set cookie in memory and only writes it on its periodic flush;
-# quitting exits WITHOUT flushing. So after sign-in we watch the cookie file for
-# the NEXT write (measured from the moment the user confirms sign-in — measuring
-# earlier was the bug: the app writes cookies at startup, so the wait ended
-# before the login cookie existed), then kill and verify.
+# quitting exits WITHOUT flushing. So we correlate cookie-store writes with the
+# moment OAuth appears. Writes from app startup are ignored, while a cookie
+# committed just before or after config.json is accepted in either ordering.
 def _config_has_oauth(cfg_path: Path) -> bool:
     """True once the fresh window has completed sign-in: the OAuth token appears
     in config.json (a plain file, readable while the app runs — unlike the
@@ -415,16 +414,39 @@ def _config_has_oauth(cfg_path: Path) -> bool:
     return bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
 
 
+def _cookie_store_signature(slot: Path) -> tuple[tuple[bool, int, int], ...]:
+    """Cheap live signature for Chromium's cookie database and journal.
+
+    SQLite can commit through ``Cookies-journal`` or ``Cookies-wal`` without
+    immediately changing the main database, so all are included. No file is
+    opened, which keeps this safe while Claude holds its exclusive database lock.
+    """
+    signature: list[tuple[bool, int, int]] = []
+    for path in (slot / "Network" / "Cookies",
+                 slot / "Network" / "Cookies-journal",
+                 slot / "Network" / "Cookies-wal"):
+        try:
+            stat = path.stat()
+            signature.append((True, stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            signature.append((False, 0, 0))
+    return tuple(signature)
+
+
 def _detect_login(slot: Path, timeout: float = 600.0) -> str:
     """Wait, hands-off, for the user to sign in — no Enter needed. Watches
-    config.json for the login, then the cookie file for the flush that puts the
+    config.json for the login and the cookie store for the flush that puts the
     sessionKey on disk. Returns "ready", "cancelled" (user pressed q) or
     "timeout". The cookie store is locked while the app runs, so we can't read
-    it live; config.json + the cookie file's write time are our live signals."""
+    it live; config.json + file metadata are our live signals."""
     cfg = slot / "config.json"
-    cookies = slot / "Network" / "Cookies"
+    cookie_ref = _cookie_store_signature(slot)
+    cookie_changed_at: float | None = None
     login_at: float | None = None
-    cookie_ref: float = 0.0
+    # config.json is derived from sessionKey, so the two writes normally happen
+    # together. Keep a small lead window for machines where SQLite commits the
+    # cookie first, without mistaking older startup writes for the login.
+    cookie_lead_window = 2.0
     spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     start = time.monotonic()
     i = 0
@@ -433,12 +455,14 @@ def _detect_login(slot: Path, timeout: float = 600.0) -> str:
             sys.stdout.write("\r\033[K")
             return "cancelled"
 
+        now = time.monotonic()
+        cookie_signature = _cookie_store_signature(slot)
+        if cookie_signature != cookie_ref:
+            cookie_ref = cookie_signature
+            cookie_changed_at = now
+
         if login_at is None and _config_has_oauth(cfg):
-            login_at = time.monotonic()
-            try:
-                cookie_ref = cookies.stat().st_mtime
-            except OSError:
-                cookie_ref = 0.0
+            login_at = now
 
         msg = ("waiting for you to sign in…" if login_at is None
                else "login detected — saving the session…")
@@ -449,13 +473,11 @@ def _detect_login(slot: Path, timeout: float = 600.0) -> str:
         i += 1
 
         if login_at is not None:
-            try:
-                m = cookies.stat().st_mtime
-            except OSError:
-                m = 0.0
-            # A cookie write after the login means the sessionKey has been
-            # committed; give it a moment to finish, then we're done.
-            if m > cookie_ref + 0.5:
+            # Accept a cookie commit after OAuth or shortly before it. The
+            # rolling reference above prevents unrelated startup writes from
+            # satisfying this condition much later when the user signs in.
+            if (cookie_changed_at is not None
+                    and cookie_changed_at >= login_at - cookie_lead_window):
                 time.sleep(1.2)
                 sys.stdout.write("\r\033[K")
                 return "ready"

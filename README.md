@@ -68,7 +68,7 @@ The tool works around this with a snapshot flow (press `2`, Claude only — also
 2. Sign in there with the account you want. Email and Google both work, since this is the real default app receiving the callback.
 3. That's it — **no key to press**. The tool detects the sign-in on its own, captures the session, and puts your main data back. Press `q` at any point to cancel and restore.
 
-How the detection works: the app is "logged in" when a `sessionKey` cookie is present (the OAuth token in `config.json` is derived from it). The cookie store is locked while the app runs, so the tool can't read it live — instead it watches `config.json` (a plain file, readable live) for the token to appear, then waits for Chromium to flush the cookie to disk, and only then captures. If you close the tool mid sign-in, it detects the interrupted state on next launch and offers to restore or drop the set-aside session.
+How the detection works: the app is "logged in" when a `sessionKey` cookie is present (the OAuth token in `config.json` is derived from it). The cookie store is locked while the app runs, so the tool can't read it live — instead it watches the cookie database and its SQLite journal/WAL alongside `config.json` (a plain file, readable live). A cookie write immediately before or after OAuth is accepted, while unrelated writes from app startup are ignored. If you close the tool mid sign-in, it detects the interrupted state on next launch and offers to restore or drop the set-aside session.
 
 Windows DPAPI encryption is scoped to the Windows user, not to the folder, so the moved session stays valid. Nothing is patched or hijacked.
 
