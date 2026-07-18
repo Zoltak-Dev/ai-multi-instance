@@ -114,12 +114,12 @@ Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/
 
 If this tool saved you some headache, a ⭐ on the repo is appreciated — it's the only feedback signal I get and it really helps the project gain visibility.
 
-<a href="https://www.star-history.com/?type=date&repos=Zoltak-Dev%2Fai-multi-instance">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Zoltak-Dev/ai-multi-instance&type=date&theme=dark&legend=top-left" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Zoltak-Dev/ai-multi-instance&type=date&legend=top-left" />
-    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Zoltak-Dev/ai-multi-instance&type=date&legend=top-left" />
-  </picture>
+<a href="https://www.star-history.com/?repos=Zoltak-Dev%2Fai-multi-instance&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Zoltak-Dev/ai-multi-instance&type=date&theme=dark&legend=top-left&sealed_token=AjPPiTEoI91pJvO3tq8VAVB4p8-33d7TyehYw_w6qztZhQkLnrnldsW_nR3I4zzVNgkRMm2NFa-7y-V4Pp6cBeSbaD0APavs6bbwwwZvA1K903na1cRLVtNI4LAtk4K58SWyy4lL9aq3SdoKJ0EUphIMsXaoL1Ng4kT3GmcYSJMQQnXZphtTThJeT0ys" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Zoltak-Dev/ai-multi-instance&type=date&legend=top-left&sealed_token=AjPPiTEoI91pJvO3tq8VAVB4p8-33d7TyehYw_w6qztZhQkLnrnldsW_nR3I4zzVNgkRMm2NFa-7y-V4Pp6cBeSbaD0APavs6bbwwwZvA1K903na1cRLVtNI4LAtk4K58SWyy4lL9aq3SdoKJ0EUphIMsXaoL1Ng4kT3GmcYSJMQQnXZphtTThJeT0ys" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Zoltak-Dev/ai-multi-instance&type=date&legend=top-left&sealed_token=AjPPiTEoI91pJvO3tq8VAVB4p8-33d7TyehYw_w6qztZhQkLnrnldsW_nR3I4zzVNgkRMm2NFa-7y-V4Pp6cBeSbaD0APavs6bbwwwZvA1K903na1cRLVtNI4LAtk4K58SWyy4lL9aq3SdoKJ0EUphIMsXaoL1Ng4kT3GmcYSJMQQnXZphtTThJeT0ys" />
+ </picture>
 </a>
 
 ## License
