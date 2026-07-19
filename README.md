@@ -1,5 +1,8 @@
 # Claude / Codex Multi-Instance
 
+[![Download](https://img.shields.io/badge/Download-Windows%20ZIP-28A745?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/Zoltak-Dev/ai-multi-instance/releases/latest/download/ai-multi-instance-v2.0.0-windows.zip)
+[![Support on Ko-fi](https://img.shields.io/badge/Support%20me-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/zoltrak)
+
 Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **and** the [Codex desktop app](https://chatgpt.com/codex) on Windows. The official clients only support one account at a time. This tool launches each app with a dedicated profile directory per account, allowing several accounts to run side by side and be switched instantly.
 
 ![Claude / Codex Multi-Instance preview](https://github.com/user-attachments/assets/3c8f5415-9795-490f-a177-153f42b21f44)
@@ -112,7 +115,7 @@ Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/
 
 ## Star History
 
-If this tool saved you some headache, a ⭐ on the repo is appreciated — it's the only feedback signal I get and it really helps the project gain visibility.
+If this tool saved you some headache, a ⭐ on the repo is appreciated — it's the only feedback signal I get and it really helps the project gain visibility. If you'd like to support its continued development, you can also [buy me a coffee on Ko-fi](https://ko-fi.com/zoltrak). Every donation helps me keep improving and maintaining the project. ❤️
 
 <a href="https://www.star-history.com/?repos=Zoltak-Dev%2Fai-multi-instance&type=date&legend=top-left">
  <picture>
