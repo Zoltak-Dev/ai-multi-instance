@@ -52,7 +52,13 @@ CLAUDE = App(
 CODEX = App(
     key="codex", display="Codex",
     package_filter="*Codex*", publisher_hash="2p2nqsd0c76g0",
-    package_prefix="OpenAI.Codex_", exe_name="Codex.exe",
+    # The package's entry point is app/ChatGPT.exe (see the AppxManifest
+    # <Application Executable="app/ChatGPT.exe">), NOT app/Codex.exe. Codex.exe
+    # is the updater trampoline (windows_update_trampoline) and carries a
+    # process trust label (SID S-1-19-512-4096) that strips execute rights from
+    # ordinary processes: CreateProcess on it fails with WinError 5 even though
+    # the file is readable and the ACL grants Users ReadAndExecute.
+    package_prefix="OpenAI.Codex_", exe_name="ChatGPT.exe",
     profiles_dirname="CodexProfiles",
     env_overrides=(
         # CLI auth (~/.codex/auth.json) — keeps OpenAI sign-in per profile.
