@@ -491,6 +491,17 @@ def login_flow(name: str) -> None:
     app = engine.current_app()
     slot = engine.default_slot_dir()
     if slot is None:
+        # Distinguish "never signed in" from "the app moved its data and we
+        # could not follow". The second would otherwise sign the new account
+        # into the existing profile while reporting success.
+        moved = engine.relocated_slot_dirs()
+        if moved:
+            pause(f"\n  {RED}Can't sign in safely.{RESET} {app.display} has moved its "
+                  f"user data and this tool can't find the new location.\n"
+                  f"  Signing in now would land in your existing profile instead of a "
+                  f"blank one.\n"
+                  f"  {DIM}Moved out of: {moved[0]}{RESET}\n"
+                  f"  Update the tool before using this.   [Enter] ")
         return
 
     _full_clear()

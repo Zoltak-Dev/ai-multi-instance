@@ -375,42 +375,120 @@ def launch_profile(name: str, exe: Path | None = None) -> None:
 # folder, so the moved state stays fully readable — usage.py already relies
 # on exactly that.
 #
-# WHERE the default slot really lives: the packaged app THINKS its userData
-# is %APPDATA%\<userdata_dirname>, but MSIX filesystem virtualization
-# redirects every access to the package's LocalCache. Verified empirically:
-# the plain %APPDATA%\Claude does not even exist outside the container —
-# the real signed-in state sits in
-#   %LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\<userdata_dirname>
-# and that path is what this tool (running OUTSIDE the container) must move.
+# WHERE the default slot really lives: this has moved once already, so the
+# location is PROBED rather than assumed. Three layouts exist in the wild:
+#
+#   1. %LOCALAPPDATA%\<userdata_dirname>-Data\<family>   Claude Desktop 3.x+
+#   2. %LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\<userdata_dirname>
+#                                                        MSIX-virtualized (<= 1.x)
+#   3. %APPDATA%\<userdata_dirname>                      unpackaged install
+#
+# Claude Desktop 3.x moved the default userData out of the MSIX container to
+# layout 1 and left the layout-2 directory standing, holding a single zero-byte
+# `.user-data-left.<family>` marker. So a plain `is_dir()` on the old path is
+# still True — for a directory whose entire purpose is to record that the
+# profile has moved OUT of it. Resolving by address and testing existence
+# therefore finds the wrong directory and reports success: the stash moves an
+# empty folder, the sign-in lands in the real default profile, and the new
+# profile is populated with the marker. Nothing is destroyed (the real data is
+# never addressed at all) but nothing is isolated either.
+#
+# Hence: ask whether a candidate CONTAINS a profile, not whether something
+# exists at the expected path. Verified against Claude 3.1623.4.0 on Windows
+# 11 build 26300, 22 Oct 2026.
 
 BACKUP_SUFFIX = ".mi-backup"
+
+# Left behind in the OLD location when the app relocates its userData.
+RELOCATION_MARKER_PREFIX = ".user-data-left"
+
+# Entries that exist only inside a userData dir the app has actually used.
+# Any one is sufficient; requiring all of them would be brittle across versions.
+_USERDATA_MARKERS = ("Local State", "Preferences", "Network")
+
+
+def _safe_iterdir(path: Path) -> list[Path]:
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
+def _has_relocation_marker(path: Path) -> bool:
+    """True when `path` is a directory the app has MOVED OUT of."""
+    return path.is_dir() and any(
+        child.name.startswith(RELOCATION_MARKER_PREFIX) for child in _safe_iterdir(path)
+    )
+
+
+def _is_live_userdata(path: Path) -> bool:
+    """True only when `path` holds real userData. Existence is NOT enough —
+    see the layout note above."""
+    if not path.is_dir() or _has_relocation_marker(path):
+        return False
+    return any((path / marker).exists() for marker in _USERDATA_MARKERS)
+
+
+def _slot_candidates(app: App) -> list[Path]:
+    """Every layout the default slot could use, most recent first. Built
+    unconditionally: `backup_dir()` has to resolve the same way before and
+    after a stash, when the live directory is temporarily absent."""
+    local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    family = app.package_prefix + app.publisher_hash
+    return [
+        local / f"{app.userdata_dirname}-Data" / family.lower(),
+        local / "Packages" / family / "LocalCache" / "Roaming" / app.userdata_dirname,
+        appdata / app.userdata_dirname,
+    ]
 
 
 def default_slot_dir(app: App | None = None) -> Path | None:
     """Real on-disk userData dir of the app's DEFAULT instance — the only dir
     that can receive the sign-in callback. None when the app has no snapshot
-    support."""
+    support, or when no candidate layout actually holds a profile."""
     app = app or _current
     if not app.userdata_dirname:
         return None
-    # MSIX install: state is virtualized into the package's LocalCache.
-    # PackageFamilyName is <Name>_<publisher hash> = package_prefix + hash.
-    local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    pkg_root = Path(local) / "Packages" / (app.package_prefix + app.publisher_hash)
-    if pkg_root.is_dir():
-        return pkg_root / "LocalCache" / "Roaming" / app.userdata_dirname
-    # Unpackaged install: the plain %APPDATA% path is the real one.
-    appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    return Path(appdata) / app.userdata_dirname
+    for candidate in _slot_candidates(app):
+        if _is_live_userdata(candidate):
+            return candidate
+    return None
+
+
+def relocated_slot_dirs(app: App | None = None) -> list[Path]:
+    """Candidate layouts the app has moved out of. A non-empty result alongside
+    `default_slot_dir() is None` means the layout changed and this tool failed
+    to follow it — which is the one state where continuing is unsafe."""
+    app = app or _current
+    if not app.userdata_dirname:
+        return []
+    return [c for c in _slot_candidates(app) if _has_relocation_marker(c)]
 
 
 def supports_login_snapshot(app: App | None = None) -> bool:
-    return default_slot_dir(app) is not None
+    """Whether this app has a userData dir the snapshot flow understands.
+    Deliberately independent of whether a profile is currently signed in —
+    an unused install still supports the flow."""
+    app = app or _current
+    return bool(app.userdata_dirname)
 
 
 def backup_dir(app: App | None = None) -> Path | None:
-    slot = default_slot_dir(app)
-    return slot.with_name(slot.name + BACKUP_SUFFIX) if slot else None
+    """Where the stash lives. An EXISTING stash wins wherever it sits, so a
+    stash taken under one layout survives an app relocation and can still be
+    restored."""
+    app = app or _current
+    if not app.userdata_dirname:
+        return None
+    candidates = _slot_candidates(app)
+    for candidate in candidates:
+        backup = candidate.with_name(candidate.name + BACKUP_SUFFIX)
+        if backup.is_dir():
+            return backup
+    live = default_slot_dir(app)
+    anchor = live if live is not None else candidates[0]
+    return anchor.with_name(anchor.name + BACKUP_SUFFIX)
 
 
 def _is_packaged_exe(exe_path: str, app: App) -> bool:
@@ -513,7 +591,20 @@ def stash_default_slot() -> bool:
     slot, backup = default_slot_dir(), backup_dir()
     if backup is not None and backup.is_dir():
         raise RuntimeError("A stashed session already exists; refusing to overwrite it.")
-    if slot is None or not slot.is_dir():
+    if slot is None:
+        # No candidate layout holds a profile. Usually that just means the user
+        # has never signed in to the default instance — safe, nothing to stash.
+        # But if a candidate carries a relocation marker, the app has moved its
+        # userData somewhere this tool does not know about, and the "fresh"
+        # sign-in would land in the real profile instead. Refuse: a silent
+        # mis-isolation is worse than a failed command.
+        moved = relocated_slot_dirs()
+        if moved:
+            raise RuntimeError(
+                "The app has relocated its user data and this tool cannot find the "
+                "new location, so a sign-in would land in your existing profile. "
+                "Relocated: " + "; ".join(str(p) for p in moved)
+            )
         return False
     _move_retry(slot, backup)
     return True
@@ -525,9 +616,14 @@ def restore_default_slot() -> None:
     have killed the fresh instance first, or the slot's files stay locked. The
     backup is never removed until it is safely renamed into place, so a failure
     here leaves the main session intact on disk for recovery."""
-    slot, backup = default_slot_dir(), backup_dir()
+    backup = backup_dir()
     if backup is None or not backup.is_dir():
         return
+    # Restore to where the stash was TAKEN FROM, by stripping the suffix —
+    # not to whatever default_slot_dir() resolves now. After a cancelled
+    # sign-in nothing is live, so probing would return None here; and this way
+    # the restore is an exact inverse of the move that created the stash.
+    slot = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
     if slot.is_dir():
         _rmtree_retry(slot)  # the throwaway fresh session; raises if still locked
     _move_retry(backup, slot)
