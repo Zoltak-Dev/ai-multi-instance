@@ -9,18 +9,21 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import platform
 import re
 import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 
-PUBLISHER_HASH = "pzs8sxrjxfjjc"
+import engine
+from engine import _has_relocation_marker, _is_live_userdata
+
+
 AUTH_KEY_PARTS = ("account", "auth", "login", "oauth", "session", "token")
 UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
@@ -91,19 +94,22 @@ def _process_summary() -> dict[str, int]:
     return summary
 
 
-def _default_slot(packages: list[dict[str, str]]) -> tuple[Path, str]:
-    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    for package in packages:
-        family = package.get("family", "")
-        if family:
-            root = local / "Packages" / family
-            if root.is_dir():
-                return root / "LocalCache" / "Roaming" / "Claude", "packaged"
-    known = local / "Packages" / f"Claude_{PUBLISHER_HASH}"
-    if known.is_dir():
-        return known / "LocalCache" / "Roaming" / "Claude", "packaged-known-family"
-    roaming = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    return roaming / "Claude", "unpackaged-fallback"
+def _slot_candidates() -> list[tuple[Path, str]]:
+    return list(zip(engine.slot_candidates(engine.CLAUDE),
+                    ("relocated", "packaged", "unpackaged")))
+
+
+def _default_slot() -> tuple[Path, str]:
+    """The slot that actually holds userData, by probing rather than by
+    assuming an address."""
+    candidates = _slot_candidates()
+    for path, kind in candidates:
+        if _is_live_userdata(path):
+            return path, kind
+    for path, kind in candidates:
+        if _has_relocation_marker(path):
+            return path, f"{kind}-but-app-moved-out"
+    return candidates[0][0], "none-found"
 
 
 def _safe_key(name: str) -> str:
@@ -190,11 +196,11 @@ def _disk_session_state(slot: Path) -> str:
     if not cookies.is_file():
         return "database-missing"
     try:
-        uri = f"file:{cookies.as_posix()}?mode=ro&immutable=1"
-        with sqlite3.connect(uri, uri=True, timeout=0.1) as connection:
+        uri = f"{cookies.resolve().as_uri()}?mode=ro&immutable=1"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as connection:
             present = connection.execute(
                 "SELECT EXISTS(SELECT 1 FROM cookies "
-                "WHERE host_key LIKE '%claude.ai%' AND name = 'sessionKey')"
+                "WHERE host_key IN ('claude.ai', '.claude.ai') AND name = 'sessionKey')"
             ).fetchone()[0]
         return "present" if present else "absent"
     except sqlite3.Error as exc:
@@ -244,7 +250,7 @@ def main() -> int:
         parser.error("duration must be >= 0 and interval must be > 0")
 
     packages = _package_info()
-    slot, slot_kind = _default_slot(packages)
+    slot, slot_kind = _default_slot()
     config = _config_state(slot)
     cookies = _cookie_state(slot)
 
@@ -256,6 +262,14 @@ def main() -> int:
     print(f"processes={json.dumps(_process_summary(), sort_keys=True)}")
     print(f"slot_kind={slot_kind}")
     print(f"slot_exists={slot.is_dir()}")
+    print(f"slot={slot}")
+    # Every layout considered, so a wrong answer is visible rather than implied.
+    for path, kind in _slot_candidates():
+        print(
+            f"candidate[{kind}] exists={path.is_dir()} "
+            f"live={_is_live_userdata(path)} moved_out={_has_relocation_marker(path)} "
+            f"path={path}"
+        )
     _print_config("initial", config)
     _print_cookies("initial", cookies)
     print(f"initial.disk_session={_disk_session_state(slot)}")
@@ -270,6 +284,7 @@ def main() -> int:
         while time.monotonic() - started < args.duration:
             time.sleep(args.interval)
             elapsed = time.monotonic() - started
+            slot, slot_kind = _default_slot()
             new_config = _config_state(slot)
             new_cookies = _cookie_state(slot)
             if new_config != config:

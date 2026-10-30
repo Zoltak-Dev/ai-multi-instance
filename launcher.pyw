@@ -5,7 +5,8 @@
 The --app flag is added automatically by desktop shortcuts. If absent, Claude
 is assumed.
 """
-import subprocess
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -56,7 +57,7 @@ def main() -> int:
 
     try:
         engine.launch_profile(name, exe=exe)
-    except RuntimeError as e:
+    except (OSError, RuntimeError, ValueError) as e:
         _error(str(e), f"{app.display} Multi-Instance")
         return 1
     return 0
