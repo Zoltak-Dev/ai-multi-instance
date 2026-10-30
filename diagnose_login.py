@@ -9,22 +9,21 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import os
 import platform
 import re
 import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 
-PUBLISHER_HASH = "pzs8sxrjxfjjc"
-# Left behind in the OLD location when the app relocates its userData.
-RELOCATION_MARKER_PREFIX = ".user-data-left"
-# Entries that exist only inside a userData dir the app has actually used.
-USERDATA_MARKERS = ("Local State", "Preferences", "Network")
+import engine
+from engine import _has_relocation_marker, _is_live_userdata
+
+
 AUTH_KEY_PARTS = ("account", "auth", "login", "oauth", "session", "token")
 UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
@@ -95,56 +94,15 @@ def _process_summary() -> dict[str, int]:
     return summary
 
 
-def _has_relocation_marker(path: Path) -> bool:
-    """True when the app has MOVED OUT of `path`, leaving a marker behind."""
-    try:
-        return path.is_dir() and any(
-            child.name.startswith(RELOCATION_MARKER_PREFIX) for child in path.iterdir()
-        )
-    except OSError:
-        return False
+def _slot_candidates() -> list[tuple[Path, str]]:
+    return list(zip(engine.slot_candidates(engine.CLAUDE),
+                    ("relocated", "packaged", "unpackaged")))
 
 
-def _is_live_userdata(path: Path) -> bool:
-    """True only when `path` holds real userData. A directory existing at the
-    expected address is NOT sufficient: Claude 3.x relocated the default
-    userData and left the old directory in place holding only a zero-byte
-    `.user-data-left.<family>` marker, so an existence check reports the
-    profile is present at a path it has just moved out of."""
-    if not path.is_dir() or _has_relocation_marker(path):
-        return False
-    return any((path / marker).exists() for marker in USERDATA_MARKERS)
-
-
-def _slot_candidates(packages: list[dict[str, str]]) -> list[tuple[Path, str]]:
-    """Every layout the default slot could use, most recent first."""
-    local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    roaming = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    families = [p["family"] for p in packages if p.get("family")]
-    families.append(f"Claude_{PUBLISHER_HASH}")
-
-    ordered: list[tuple[Path, str]] = []
-    for family in families:
-        ordered.append((local / "Claude-Data" / family.lower(), "relocated-3x"))
-    for family in families:
-        ordered.append(
-            (local / "Packages" / family / "LocalCache" / "Roaming" / "Claude", "packaged")
-        )
-    ordered.append((roaming / "Claude", "unpackaged"))
-
-    seen: set[Path] = set()
-    unique: list[tuple[Path, str]] = []
-    for path, kind in ordered:
-        if path not in seen:
-            seen.add(path)
-            unique.append((path, kind))
-    return unique
-
-
-def _default_slot(packages: list[dict[str, str]]) -> tuple[Path, str]:
+def _default_slot() -> tuple[Path, str]:
     """The slot that actually holds userData, by probing rather than by
     assuming an address."""
-    candidates = _slot_candidates(packages)
+    candidates = _slot_candidates()
     for path, kind in candidates:
         if _is_live_userdata(path):
             return path, kind
@@ -238,11 +196,11 @@ def _disk_session_state(slot: Path) -> str:
     if not cookies.is_file():
         return "database-missing"
     try:
-        uri = f"file:{cookies.as_posix()}?mode=ro&immutable=1"
-        with sqlite3.connect(uri, uri=True, timeout=0.1) as connection:
+        uri = f"{cookies.resolve().as_uri()}?mode=ro&immutable=1"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.1)) as connection:
             present = connection.execute(
                 "SELECT EXISTS(SELECT 1 FROM cookies "
-                "WHERE host_key LIKE '%claude.ai%' AND name = 'sessionKey')"
+                "WHERE host_key IN ('claude.ai', '.claude.ai') AND name = 'sessionKey')"
             ).fetchone()[0]
         return "present" if present else "absent"
     except sqlite3.Error as exc:
@@ -292,7 +250,7 @@ def main() -> int:
         parser.error("duration must be >= 0 and interval must be > 0")
 
     packages = _package_info()
-    slot, slot_kind = _default_slot(packages)
+    slot, slot_kind = _default_slot()
     config = _config_state(slot)
     cookies = _cookie_state(slot)
 
@@ -306,7 +264,7 @@ def main() -> int:
     print(f"slot_exists={slot.is_dir()}")
     print(f"slot={slot}")
     # Every layout considered, so a wrong answer is visible rather than implied.
-    for path, kind in _slot_candidates(packages):
+    for path, kind in _slot_candidates():
         print(
             f"candidate[{kind}] exists={path.is_dir()} "
             f"live={_is_live_userdata(path)} moved_out={_has_relocation_marker(path)} "
@@ -326,6 +284,7 @@ def main() -> int:
         while time.monotonic() - started < args.duration:
             time.sleep(args.interval)
             elapsed = time.monotonic() - started
+            slot, slot_kind = _default_slot()
             new_config = _config_state(slot)
             new_cookies = _cookie_state(slot)
             if new_config != config:

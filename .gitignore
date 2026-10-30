@@ -8,5 +8,6 @@ dist/
 # Runtime / user state (never commit — machine-specific or sensitive)
 state.json
 usage_cache.json
+usage_cache.json.tmp
 ClaudeProfiles/
 CodexProfiles/
