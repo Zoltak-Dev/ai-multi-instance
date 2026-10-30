@@ -1,6 +1,6 @@
 # Claude / Codex Multi-Instance
 
-[![Download](https://img.shields.io/badge/Download-Windows%20ZIP-28A745?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/Zoltak-Dev/ai-multi-instance/releases/latest/download/ai-multi-instance-v2.0.0-windows.zip)
+[![Download](https://img.shields.io/badge/Download-Windows%20ZIP-28A745?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/Zoltak-Dev/ai-multi-instance/releases/latest/download/ai-multi-instance-v2.0.1-windows.zip)
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20me-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/zoltrak)
 
 Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **and** the [Codex desktop app](https://chatgpt.com/codex) on Windows. The official clients only support one account at a time. This tool launches each app with a dedicated profile directory per account, allowing several accounts to run side by side and be switched instantly.
@@ -13,7 +13,7 @@ The interface is arrow-key driven: move the highlight with `↑`/`↓`, then pre
 
 Windows 10+ and the Claude and/or Codex desktop app installed.
 
-**Verified against:** Claude Desktop `3.1623.4.0` on Windows 11 build `26300`, 22 Oct 2026. This tool depends on where the desktop app stores its user data, which the app has relocated once already without notice — if your Claude version is much newer than that date, run `python diagnose_login.py --duration 0` first and check that the reported `slot` is a directory holding real data.
+**Compatibility checked on 30 October 2026:** Claude Desktop `3.1623.1.0`, Codex `26.1027.3384.0`, Windows 11 build `26200`. Two temporary profiles of each app were launched side by side. Snapshot adoption, cancellation and recovery are covered by automated tests using temporary directories; a complete browser sign-in still needs to be checked with your account.
 
 **From source (recommended)** — requires Python 3.9+:
 
@@ -27,18 +27,9 @@ No `pip install` — the project uses only the Python standard library.
 
 **Pre-built binary (no Python required)** — download `ai-multi-instance-vX.Y.Z-windows.zip` from [Releases](https://github.com/Zoltak-Dev/ai-multi-instance/releases), unzip both `.exe` files in the same folder, and run `ai-multi-instance.exe`.
 
-📹 **Video walkthrough** — Disable Smart App Control:
+The binaries are unsigned. Windows may show a SmartScreen warning, and [Smart App Control](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview) may block unknown unsigned apps. If Windows blocks the download, use the source install above.
 
-https://github.com/user-attachments/assets/a46521fc-482f-4d55-9375-8c0cc38c79f0
-
-
-
-> ⚠️ **Windows blocks unsigned binaries by default.** Windows refuses to run any `.exe` without a code-signing certificate (which costs 300-600 €/year — not viable for a free project). To run the `.exe`:
->
-> 1. **Windows Security** → **App & browser control** → **Smart App Control settings** → switch from **On** to **Off**
-> 2. Launch `ai-multi-instance.exe`. Windows will show *"Windows protected your PC"* → click **More info** → **Run anyway**
->
-> If you'd rather skip all this, use the source install above — no warning, no setup.
+**Updating:** replace the two executables together, or run `git pull --ff-only` for a source install. Keep your `ClaudeProfiles`, `CodexProfiles`, `state.json` and `usage_cache.json` files. Do not run two copies of the manager's sign-in flow at once.
 
 ## Usage
 
@@ -57,17 +48,15 @@ Deleting the folder is the same as deleting the profile.
 
 Claude and Codex use different mechanisms to enforce their single-instance behavior.
 
-The Claude desktop app respects Chromium's standard `--user-data-dir` flag: different value, different singleton lock, allowing multiple instances to run side by side.
+Claude profiles use Chromium's `--user-data-dir` plus a per-profile `LOCALAPPDATA` under `<profile>/.localappdata`. Some Claude versions redirect their data to `%LOCALAPPDATA%/Claude-Data/<family>` before checking the single-instance lock; isolating both locations prevents them from opening the main account instead. Child tools inherit that `LOCALAPPDATA`, so their local caches are also separate.
 
-Codex behaves differently. Its `bootstrap.js` calls `app.setPath('userData', ...)` to a hardcoded path **before** `app.requestSingleInstanceLock()`, so the CLI flag never reaches the singleton check and any second launch exits immediately.
+Codex profiles use `--user-data-dir` and `CODEX_ELECTRON_USER_DATA_PATH` for desktop data, plus `CODEX_HOME` for authentication. `CODEX_CLI_PATH` points to the installed app's bundled CLI when present, avoiding package-identity errors after updates. The launcher rediscovers the executable when an app update removes its old installation path.
 
 ## Signing in to a profile
 
-A profile instance can never complete a sign-in on its own: the sign-in callback (`claude://…` — email magic link or Google OAuth alike) is delivered by Windows to a freshly spawned process that always resolves to the **default** app instance, never a profile. The UCPD driver ignores programmatic `UserChoice` registry writes, so this tool cannot redirect the protocol for you — which is why it uses the snapshot approach below instead.
+Windows normally delivers the `claude://` sign-in callback to the default Claude instance. The tool uses a temporary snapshot of that instance so the browser callback can complete normally, then moves the signed-in state into your chosen profile.
 
-Redirecting the protocol per profile *is* achievable, but only by hand: a `UserChoice` written by the user through **Settings → Apps → Default apps → URL:claude** is not reverted by UCPD, because the protection applies to programmatic writes rather than to the user's own choice. Measured on Windows 11 build 26300 with UCPD running. If you want that route instead of snapshots, the relevant key is `HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\claude\UserChoice` — note `Shell\Associations`, not `Explorer\UrlAssociations`, which is for file-extension associations and does not exist for a URL scheme.
-
-(A subtlety: the default instance's data has lived in three different places across versions, so this tool **probes** for it rather than assuming an address — see [Known limitations](#known-limitations). Claude 3.x keeps it in `%LOCALAPPDATA%\Claude-Data\<family>`; Claude 1.x kept it inside the MSIX container at `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude`; an unpackaged install uses the plain `%APPDATA%\Claude`. Whichever one actually holds a profile is what gets moved around below.)
+(A subtlety: the default instance's data has lived in three different places across versions, so this tool **probes** for it rather than assuming an address — see [Known limitations](#known-limitations). Recent Claude versions keep it in `%LOCALAPPDATA%\Claude-Data\<family>`; older Claude versions kept it inside the MSIX container at `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude`; an unpackaged install uses the plain `%APPDATA%\Claude`. Whichever one actually holds a profile is what gets moved around below.)
 
 The tool works around this with a snapshot flow (press `2`, Claude only — also offered right after creating a profile):
 
@@ -105,24 +94,35 @@ Both are per account, need no extra logins, and use only the Python standard lib
 
 ## Known limitations
 
-**If you are on `v2.0.0` or earlier and running Claude Desktop 3.x, do not use the sign-in snapshot.** Those releases resolve the default user-data directory by address and test only that a directory exists there. Claude 3.x moved that directory and left the old one in place holding a single zero-byte `.user-data-left.<family>` marker, so the check passes against a folder the app has moved out of. The result is silent: the tool sets aside an empty directory and reports success, the "fresh" sign-in lands in your existing default profile, and the new profile is created empty. Nothing is deleted — the real data is never addressed at all — but nothing is isolated either, and you lose the session you were signed in to. Current `main` probes for a directory that actually contains a profile, and refuses to continue if it finds a relocation marker and no live profile.
+**Use v2.0.1 or newer with recent Claude versions.** Earlier releases can mistake a relocated profile's empty old directory for its real data. Current code checks for profile contents, ignores `.user-data-left` markers, and stops sign-in if the real data cannot be found. Run `python diagnose_login.py --duration 0` to inspect the paths without changing anything.
+
+**Cowork virtual machines:** chat and account isolation are supported, but Cowork's machine-wide VM service can resolve bundle paths outside a named profile. Concurrent VMs and a fix for that service are not verified; see [issue #5](https://github.com/Zoltak-Dev/ai-multi-instance/issues/5). This release does not claim to fix Cowork VM startup.
 
 **The sign-in snapshot moves your real profile directory.** It is a rename, not a copy, and it is the mechanism the tool is built on. A stash is never deleted until it has been renamed back into place, and an interrupted run leaves it on disk for recovery — but close the app before running it, and do not interrupt it mid-flow.
 
 **Profiles are isolation, not a sandbox.** Windows DPAPI is scoped to the Windows user rather than to the folder, so any profile's stored secrets stay readable by anything running as you. Separate accounts, same trust boundary.
 
-**Codex has no sign-in snapshot.** The flow requires a known user-data directory; Codex authenticates differently and only profile launching is supported there.
+**Codex signs in inside each profile.** Launch the profile and follow its normal sign-in screen; the snapshot action is only needed for Claude.
 
 **Only one instance owns the `claude://` protocol at a time.** That is a Windows constraint rather than a tool one, and it is why sign-in needs the snapshot dance at all.
+
+## Checks
+
+```powershell
+python -m unittest discover -v
+python diagnose_login.py --duration 0
+```
+
+The tests use temporary data and mocked process launches; they do not close or move your real sessions. GitHub Actions runs them on Windows with Python 3.9 and 3.14 and builds both executables.
 
 ## Build
 
 Standalone `.exe` build via PyInstaller, for shipping to users who don't have Python:
 
 ```powershell
-pip install pyinstaller
-pyinstaller --onefile --console --name ai-multi-instance --clean --noconfirm main.py
-pyinstaller --onefile --noconsole --name launcher --clean --noconfirm launcher.pyw
+python -m pip install pyinstaller==6.20.0
+python -m PyInstaller --onefile --console --name ai-multi-instance --clean --noconfirm main.py
+python -m PyInstaller --onefile --noconsole --name launcher --clean --noconfirm launcher.pyw
 ```
 
 The two binaries land in `dist/`. Ship them in the same folder — `ai-multi-instance.exe` looks for `launcher.exe` next to itself to manage desktop shortcuts for both Claude and Codex.

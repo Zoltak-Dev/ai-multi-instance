@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import msvcrt
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -266,7 +267,7 @@ def do_launch(state: State) -> None:
         try:
             engine.launch_default_slot()
             state.status = f"{GREEN}✓ launched the main instance{RESET}"
-        except RuntimeError as e:
+        except (OSError, RuntimeError, ValueError) as e:
             state.status = f"{RED}{e}{RESET}"
         return
     names = state.targets()
@@ -276,7 +277,7 @@ def do_launch(state: State) -> None:
     for n in names:
         try:
             engine.launch_profile(n)
-        except RuntimeError as e:
+        except (OSError, RuntimeError, ValueError) as e:
             errs.append(f"{n}: {e}")
     state.status = (f"{RED}{'; '.join(errs)}{RESET}" if errs
                     else f"{GREEN}✓ launched {', '.join(names)}{RESET}")
@@ -306,7 +307,7 @@ def do_shortcut(state: State) -> None:
     for n in names:
         try:
             engine.delete_shortcut(n) if engine.shortcut_exists(n) else engine.create_shortcut(n)
-        except OSError as e:
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
             state.status = f"{RED}{n}: {e}{RESET}"
             return
     state.status = f"{GREEN}✓ shortcut toggled{RESET}"
@@ -326,7 +327,7 @@ def do_new(state: State) -> None:
     try:
         engine.create_profile(name)
         engine.create_shortcut(name)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
         pause(f"  {RED}Error: {e}{RESET}   [Enter] ")
         return
     state.status = f"{GREEN}✓ created {name}{RESET}"
@@ -348,7 +349,7 @@ def do_rename(state: State) -> None:
     try:
         engine.rename_profile(name, new)
         state.status = f"{GREEN}✓ renamed to {new}{RESET}"
-    except (OSError, ValueError, FileExistsError, FileNotFoundError) as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
         pause(f"  {RED}Rename failed: {e}{RESET}   [Enter] ")
 
 
@@ -367,7 +368,7 @@ def do_delete(state: State) -> None:
     for n in names:
         try:
             engine.delete_profile(n)
-        except OSError as e:
+        except (OSError, ValueError) as e:
             failed.append(f"{n} ({e})")
     state.checked.clear()
     if failed:
@@ -411,7 +412,7 @@ def _config_has_oauth(cfg_path: Path) -> bool:
         cfg = json.loads(cfg_path.read_text("utf-8"))
     except (OSError, ValueError):
         return False
-    return bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
+    return isinstance(cfg, dict) and bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
 
 
 def _cookie_store_signature(slot: Path) -> tuple[tuple[bool, int, int], ...]:
@@ -433,7 +434,7 @@ def _cookie_store_signature(slot: Path) -> tuple[tuple[bool, int, int], ...]:
     return tuple(signature)
 
 
-def _detect_login(slot: Path, timeout: float = 600.0) -> str:
+def _detect_login(slot: Path, timeout: float = 600.0, *, follow_default: bool = False) -> str:
     """Wait, hands-off, for the user to sign in — no Enter needed. Watches
     config.json for the login and the cookie store for the flush that puts the
     sessionKey on disk. Returns "ready", "cancelled" (user pressed q) or
@@ -456,6 +457,9 @@ def _detect_login(slot: Path, timeout: float = 600.0) -> str:
             return "cancelled"
 
         now = time.monotonic()
+        if follow_default:
+            slot = engine.default_slot_dir() or slot
+            cfg = slot / "config.json"
         cookie_signature = _cookie_store_signature(slot)
         if cookie_signature != cookie_ref:
             cookie_ref = cookie_signature
@@ -489,6 +493,8 @@ def _detect_login(slot: Path, timeout: float = 600.0) -> str:
 
 def login_flow(name: str) -> None:
     app = engine.current_app()
+    if not engine.supports_login_snapshot():
+        return
     slot = engine.default_slot_dir()
     if slot is None:
         # Distinguish "never signed in" from "the app moved its data and we
@@ -502,7 +508,8 @@ def login_flow(name: str) -> None:
                   f"blank one.\n"
                   f"  {DIM}Moved out of: {moved[0]}{RESET}\n"
                   f"  Update the tool before using this.   [Enter] ")
-        return
+            return
+        slot = engine.slot_candidates(app)[0]
 
     _full_clear()
     print(f"\n  {BOLD}Sign in '{name}'{RESET}\n")
@@ -526,17 +533,20 @@ def login_flow(name: str) -> None:
     engine.close_profile(name)
     adopted = False
     stashed = False
+    fresh_started = False
     try:
         print(f"\n  {DIM}closing {app.display} and setting your session aside…{RESET}")
         engine.close_default_slot(wait=20)
         stashed = engine.stash_default_slot()
         engine.launch_default_slot()
+        fresh_started = True
         print(f"\n  A blank {app.display} opened — {BOLD}sign in there{RESET} "
               f"{DIM}(email or Google).{RESET}\n")
 
-        outcome = _detect_login(slot)
+        outcome = _detect_login(slot, follow_default=True)
         if outcome == "ready":
             engine.close_default_slot(wait=15)
+            slot = engine.default_slot_dir() or slot
             snap = usage.session_snapshot(slot)
             if snap["sessionKey"]:
                 engine.adopt_default_into(name)
@@ -550,16 +560,17 @@ def login_flow(name: str) -> None:
             print(f"\n  {DIM}cancelled — putting everything back…{RESET}")
         else:  # timeout
             print(f"\n  {YELLOW}Timed out waiting for sign-in — putting everything back…{RESET}")
-    except (OSError, RuntimeError) as e:
+    except (OSError, RuntimeError, ValueError) as e:
         pause(f"  {RED}Sign-in failed: {e}{RESET}   [Enter] ")
     finally:
         # Always tear the fresh window down, then restore the main session. This
         # order matters: the slot's files stay locked while the app runs.
-        engine.close_default_slot(wait=15)
+        if fresh_started:
+            engine.close_default_slot(wait=15)
         if stashed and engine.has_orphan_backup():
             try:
                 engine.restore_default_slot()
-            except OSError as e:
+            except (OSError, RuntimeError) as e:
                 pause(f"  {RED}Could not restore your main session: {e}{RESET}\n"
                       f"  It is safe at {engine.backup_dir()} — restart the tool to recover it.   [Enter] ")
         # Reopen the main app ONLY when we aborted (cancel/timeout/error) and it
@@ -569,9 +580,9 @@ def login_flow(name: str) -> None:
             print(f"  {DIM}reopening your main {app.display}…{RESET}")
             try:
                 engine.launch_default_slot()
-            except RuntimeError:
+            except (OSError, RuntimeError):
                 pass
-    if adopted:
+    if adopted and not engine.has_orphan_backup():
         pause(f"\n  {GREEN}✓ '{name}' is signed in and ready.{RESET}  "
               f"Highlight it and press {BOLD}1{RESET} to launch.   [Enter] ")
 
@@ -609,6 +620,8 @@ def render_usage(results: list[usage.ProfileUsage], app_display: str) -> list[st
             lines.append("")
             continue
         lines.append(f"  {th}{BOLD}{name}{RESET}   {DIM}{_ellip(r.account, 34)}{RESET}")
+        if not r.rows:
+            lines.append(f"     {DIM}no usage limits reported by the app{RESET}")
         for label, pct, reset in r.rows:
             pct_txt = usage.format_pct(pct)
             pct_col = " " * max(0, 4 - len(pct_txt)) + _usage_pct(pct)
@@ -729,8 +742,9 @@ def _recover_interrupted() -> None:
         engine.discard_backup()
     else:
         try:
+            engine.close_default_slot(wait=15)
             engine.restore_default_slot()
-        except OSError as e:
+        except (OSError, RuntimeError) as e:
             pause(f"  {RED}Restore failed: {e}{RESET}   [Enter] ")
 
 

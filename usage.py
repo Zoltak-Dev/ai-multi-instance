@@ -215,10 +215,10 @@ def _read_claude_cookies(profile_dir: Path) -> dict[str, str]:
     db = profile_dir / "Network" / "Cookies"
     if not db.is_file():
         return {}
-    con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+    con = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
     try:
         rows = con.execute(
-            "SELECT host_key, name, encrypted_value FROM cookies WHERE host_key LIKE '%claude.ai%'"
+            "SELECT host_key, name, encrypted_value FROM cookies WHERE host_key IN ('claude.ai', '.claude.ai')"
         ).fetchall()
     finally:
         con.close()
@@ -247,7 +247,8 @@ _CACHE_LOCK = threading.Lock()
 
 def _load_cache() -> dict:
     try:
-        return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+        cache = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+        return cache if isinstance(cache, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -306,6 +307,8 @@ def _read_session(profile_dir: Path) -> tuple[str, str | None, str | None]:
         jar = _read_claude_cookies(profile_dir)
     except (sqlite3.Error, OSError):
         return "locked", None, None
+    except (ValueError, KeyError, TypeError):
+        return "absent", None, None
     session = jar.get("sessionKey")
     if not session:
         return "absent", None, None
@@ -374,12 +377,13 @@ def _window_label(seconds) -> str:
 
 def _fetch_claude(name: str, profile_dir: Path) -> ProfileUsage:
     res = ProfileUsage(name=name)
+    cache_key = str(profile_dir.resolve())
 
     status, session, cf = _read_session(profile_dir)
     if status == "live":
-        _cache_put_session(name, session)  # keep the cache warm for when it locks
+        _cache_put_session(cache_key, session)  # keep the cache warm for when it locks
     else:
-        session = _cache_get_session(name)  # fall back while the instance holds the lock
+        session = _cache_get_session(cache_key) if status == "locked" else None
         cf = None
         if not session:
             res.error = "app open — close it once" if status == "locked" else "not signed in"
@@ -387,7 +391,11 @@ def _fetch_claude(name: str, profile_dir: Path) -> ProfileUsage:
 
     cookie_header = f"sessionKey={session}" + (f"; cf_clearance={cf}" if cf else "")
     try:
-        org = _pick_org(_api_get(_ORGS_URL, cookie_header))
+        orgs = _api_get(_ORGS_URL, cookie_header)
+        if not orgs:
+            res.error = "no organizations found"
+            return res
+        org = _pick_org(orgs)
         res.account = _account_label(org.get("name", ""))
         org_id = org.get("uuid") or org.get("id")
         data = _api_get(_USAGE_URL.format(org=org_id), cookie_header)
@@ -408,7 +416,7 @@ def _fetch_claude(name: str, profile_dir: Path) -> ProfileUsage:
         res.error = {401: "session expired", 403: "blocked (Cloudflare)",
                      429: "rate-limited"}.get(exc.code, f"HTTP {exc.code}")
         if exc.code == 401:
-            _cache_drop(name)  # token rotated — drop it so the next read re-captures
+            _cache_drop(cache_key)  # token rotated — drop it so the next read re-captures
     except urllib.error.URLError:
         res.error = "network unavailable"
     except (OSError, ValueError, KeyError) as exc:
@@ -439,7 +447,7 @@ def _codex_get(url: str, access_token: str, account_id: str, timeout: float = 20
 def _epoch_to_iso(ts) -> str:
     try:
         return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OSError, OverflowError):
         return ""
 
 
@@ -487,12 +495,12 @@ def session_snapshot(profile_dir: Path) -> dict:
     has_sk = False
     try:
         has_sk = bool(_read_claude_cookies(profile_dir).get("sessionKey"))
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError):
         pass
     has_oauth = False
     try:
         cfg = json.loads((profile_dir / "config.json").read_text("utf-8"))
-        has_oauth = bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
+        has_oauth = isinstance(cfg, dict) and bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
     except (OSError, ValueError):
         pass
     return {"sessionKey": has_sk, "oauth": has_oauth}
@@ -506,9 +514,17 @@ def fetch_all(targets: list[tuple[str, Path]], app: str = "claude") -> list[Prof
     if not targets:
         return []
     fetch = _fetch_codex if app == "codex" else _fetch_claude
+
+    def fetch_target(target: tuple[str, Path]) -> ProfileUsage:
+        try:
+            return fetch(*target)
+        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError,
+                AttributeError, IndexError, OverflowError):
+            return ProfileUsage(name=target[0], error="unreadable account data")
+
     workers = min(8, len(targets))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda t: fetch(t[0], t[1]), targets))
+        return list(pool.map(fetch_target, targets))
 
 
 # --- Formatting helpers (consumed by the UI layer) ------------------------- #
@@ -520,7 +536,7 @@ def humanize_reset(iso: str) -> str:
     if not iso:
         return "—"
     try:
-        when = datetime.fromisoformat(iso)
+        when = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
         return "—"
     now = datetime.now(when.tzinfo) if when.tzinfo else datetime.now()

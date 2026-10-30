@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -47,6 +48,9 @@ CLAUDE = App(
     package_filter="*Claude*", publisher_hash="pzs8sxrjxfjjc",
     package_prefix="Claude_", exe_name="claude.exe",
     profiles_dirname="ClaudeProfiles",
+    # Claude 2.x+ can redirect userData before its singleton check. Keep its
+    # relocation target separate as well as passing --user-data-dir.
+    env_overrides=(("LOCALAPPDATA", ".localappdata"),),
     userdata_dirname="Claude",
 )
 CODEX = App(
@@ -95,7 +99,8 @@ STATE_FILE = PROJECT_DIR / "state.json"
 # Schema:  { "selected_app": "claude"|"codex" }
 def _load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -151,8 +156,9 @@ def find_app_exe(refresh: bool = False, app: App | None = None) -> Path | None:
     """Locate the app's main exe. MSIX install path changes on every update,
     so query Get-AppxPackage and cache per session."""
     app = app or _current
-    if not refresh and app.key in _exe_cache:
-        return _exe_cache[app.key]
+    cached = _exe_cache.get(app.key)
+    if not refresh and cached is not None and cached.is_file():
+        return cached
 
     exe: Path | None = None
     try:
@@ -202,24 +208,33 @@ def list_profiles() -> list[Path]:
 
 
 def valid_profile_name(name: str) -> bool:
-    return bool(name) and not any(c in INVALID_CHARS for c in name)
+    reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    reserved.update(f"{prefix}{digit}" for prefix in ("COM", "LPT")
+                    for digit in "123456789¹²³")
+    return (bool(name) and name == name.strip() and not name.endswith(".")
+            and not any(c in INVALID_CHARS or ord(c) < 32 for c in name)
+            and name.split(".", 1)[0].rstrip().upper() not in reserved)
+
+
+def _profile_path(name: str) -> Path:
+    if not valid_profile_name(name):
+        raise ValueError(f"Invalid profile name: {name!r}")
+    profile = PROFILES_DIR / name
+    if profile.is_symlink() or profile.resolve().parent != PROFILES_DIR.resolve():
+        raise ValueError(f"Profile must be a directory inside {PROFILES_DIR}")
+    return profile
 
 
 def create_profile(name: str) -> Path:
-    if not valid_profile_name(name):
-        raise ValueError(f"Invalid name: {name!r}")
-    profile = PROFILES_DIR / name
+    profile = _profile_path(name)
     profile.mkdir(parents=True, exist_ok=True)
     return profile
 
 
 def _force_rw(func, path, _exc):
     """rmtree error handler: clear read-only bit (Git pack .idx files set it) and retry."""
-    try:
-        os.chmod(path, stat.S_IWRITE)
-        func(path)
-    except OSError:
-        pass
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 
 def _rmtree(path: Path) -> None:
@@ -231,24 +246,21 @@ def _rmtree(path: Path) -> None:
 
 
 def delete_profile(name: str) -> None:
-    profile = PROFILES_DIR / name
+    profile = _profile_path(name)
+    if profile.exists():
+        _rmtree(profile)
     lnk = desktop_dir() / shortcut_filename(name)
     if lnk.exists():
         try:
             lnk.unlink()
         except OSError:
             pass
-    if profile.exists():
-        _rmtree(profile)
 
 
 def rename_profile(old: str, new: str) -> None:
-    if not valid_profile_name(new):
-        raise ValueError(f"Invalid name: {new!r}")
+    src, dst = _profile_path(old), _profile_path(new)
     if old == new:
         return
-    src = PROFILES_DIR / old
-    dst = PROFILES_DIR / new
     if not src.is_dir():
         raise FileNotFoundError(f"Profile not found: {old}")
     if dst.exists():
@@ -299,31 +311,33 @@ def _kill_pids(pids: list[int]) -> int:
     return killed
 
 
+def _user_data_dir(command: str) -> Path | None:
+    # Windows may quote the entire argument or just its value. Splitting on
+    # whitespace truncates profile names like "Work account" to "Work".
+    match = re.search(
+        r'(?:^|\s)(?:"--user-data-dir=([^"]*)"|--user-data-dir=(?:"([^"]*)"|(\S+))'
+        r'|--user-data-dir\s+(?:"([^"]*)"|(\S+)))', command, re.IGNORECASE)
+    value = next((part for part in match.groups() if part), None) if match else None
+    return Path(value) if value else None
+
+
 def running_profiles() -> dict[str, list[int]]:
     """Return {profile_name: [pids]} for processes of the current app using
     one of our --user-data-dir paths."""
     result: dict[str, list[int]] = {}
-    flag = "--user-data-dir="
     profiles_root = str(PROFILES_DIR).lower()
 
     for pid, _exe, cmd in _processes(_current.exe_name):
-        idx = cmd.lower().find(flag)
-        if idx == -1:
-            continue
-        rest = cmd[idx + len(flag):]
-        if rest.startswith('"'):
-            path_str = rest[1:].split('"', 1)[0]
-        else:
-            path_str = rest.split()[0] if rest else ""
-        if not path_str:
+        data = _user_data_dir(cmd)
+        if data is None:
             continue
         try:
-            parent = str(Path(path_str).parent).lower()
+            parent = str(data.parent).lower()
         except OSError:
             continue
         if parent != profiles_root:
             continue
-        result.setdefault(Path(path_str).name, []).append(pid)
+        result.setdefault(data.name, []).append(pid)
     return result
 
 
@@ -336,8 +350,9 @@ def profile_env(name: str) -> dict[str, str]:
     Adds every per-profile env override defined on the app (e.g. CODEX_HOME,
     CODEX_ELECTRON_USER_DATA_PATH)."""
     env = dict(os.environ)
+    profile = _profile_path(name)
     for var, sub in _current.env_overrides:
-        target = PROFILES_DIR / name / sub
+        target = profile / sub
         target.mkdir(parents=True, exist_ok=True)
         env[var] = str(target)
     return env
@@ -347,7 +362,7 @@ def launch_profile(name: str, exe: Path | None = None) -> None:
     exe = exe or find_app_exe()
     if exe is None:
         raise RuntimeError(f"{_current.display} not found. Is the desktop app installed?")
-    data_dir = PROFILES_DIR / name
+    data_dir = _profile_path(name)
     data_dir.mkdir(parents=True, exist_ok=True)
     env = profile_env(name)
     if _current is CODEX:
@@ -363,39 +378,14 @@ def launch_profile(name: str, exe: Path | None = None) -> None:
 
 
 # --- Default-slot sign-in (snapshot model) --------------------------------- #
-# The MSIX package owns the app's protocol (claude://…): every sign-in
-# callback — email magic link or OAuth — lands in the instance launched
-# WITHOUT --user-data-dir (the "default slot"). Redirecting the protocol per
-# profile is impossible on current Windows: the UCPD driver ignores
-# programmatic UserChoice writes and MSIX protocol activation bypasses the
-# registry entirely. So profiles get signed in by snapshot instead: stash the
-# default slot aside, let the user sign in there (the callback works, it's
-# the real default app), move the freshly signed-in state into the profile,
-# restore the stash. DPAPI blobs are scoped to the Windows user, not to the
-# folder, so the moved state stays fully readable — usage.py already relies
-# on exactly that.
+# Browser callbacks normally activate the default instance. Stash its data,
+# sign in there, adopt the fresh session into a profile, then restore the main
+# session. DPAPI data stays readable under the same Windows user.
 #
-# WHERE the default slot really lives: this has moved once already, so the
-# location is PROBED rather than assumed. Three layouts exist in the wild:
-#
-#   1. %LOCALAPPDATA%\<userdata_dirname>-Data\<family>   Claude Desktop 3.x+
-#   2. %LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\<userdata_dirname>
-#                                                        MSIX-virtualized (<= 1.x)
-#   3. %APPDATA%\<userdata_dirname>                      unpackaged install
-#
-# Claude Desktop 3.x moved the default userData out of the MSIX container to
-# layout 1 and left the layout-2 directory standing, holding a single zero-byte
-# `.user-data-left.<family>` marker. So a plain `is_dir()` on the old path is
-# still True — for a directory whose entire purpose is to record that the
-# profile has moved OUT of it. Resolving by address and testing existence
-# therefore finds the wrong directory and reports success: the stash moves an
-# empty folder, the sign-in lands in the real default profile, and the new
-# profile is populated with the marker. Nothing is destroyed (the real data is
-# never addressed at all) but nothing is isolated either.
-#
-# Hence: ask whether a candidate CONTAINS a profile, not whether something
-# exists at the expected path. Verified against Claude 3.1623.4.0 on Windows
-# 11 build 26300, 22 Oct 2026.
+# Claude has used three layouts: Local/Claude-Data/<family>, the MSIX
+# LocalCache/Roaming/Claude directory, and plain Roaming/Claude. The old MSIX
+# directory may remain as an empty .user-data-left.<family> marker. Probe the
+# contents rather than trusting that a directory exists at the expected path.
 
 BACKUP_SUFFIX = ".mi-backup"
 
@@ -429,7 +419,7 @@ def _is_live_userdata(path: Path) -> bool:
     return any((path / marker).exists() for marker in _USERDATA_MARKERS)
 
 
-def _slot_candidates(app: App) -> list[Path]:
+def slot_candidates(app: App) -> list[Path]:
     """Every layout the default slot could use, most recent first. Built
     unconditionally: `backup_dir()` has to resolve the same way before and
     after a stash, when the live directory is temporarily absent."""
@@ -450,7 +440,7 @@ def default_slot_dir(app: App | None = None) -> Path | None:
     app = app or _current
     if not app.userdata_dirname:
         return None
-    for candidate in _slot_candidates(app):
+    for candidate in slot_candidates(app):
         if _is_live_userdata(candidate):
             return candidate
     return None
@@ -463,7 +453,7 @@ def relocated_slot_dirs(app: App | None = None) -> list[Path]:
     app = app or _current
     if not app.userdata_dirname:
         return []
-    return [c for c in _slot_candidates(app) if _has_relocation_marker(c)]
+    return [c for c in slot_candidates(app) if _has_relocation_marker(c)]
 
 
 def supports_login_snapshot(app: App | None = None) -> bool:
@@ -481,7 +471,7 @@ def backup_dir(app: App | None = None) -> Path | None:
     app = app or _current
     if not app.userdata_dirname:
         return None
-    candidates = _slot_candidates(app)
+    candidates = slot_candidates(app)
     for candidate in candidates:
         backup = candidate.with_name(candidate.name + BACKUP_SUFFIX)
         if backup.is_dir():
@@ -515,7 +505,7 @@ def default_slot_pids() -> list[int]:
         if not _is_packaged_exe(exe_path, _current):
             continue
         low = cmd.lower()
-        if "--user-data-dir=" not in low and "--type=" not in low:
+        if _user_data_dir(cmd) is None and "--type=" not in low:
             pids.append(pid)
     return pids
 
@@ -619,11 +609,16 @@ def restore_default_slot() -> None:
     backup = backup_dir()
     if backup is None or not backup.is_dir():
         return
+    if not _is_live_userdata(backup):
+        raise RuntimeError(f"Backup {backup} has no recognized profile data. Nothing was removed.")
     # Restore to where the stash was TAKEN FROM, by stripping the suffix —
     # not to whatever default_slot_dir() resolves now. After a cancelled
     # sign-in nothing is live, so probing would return None here; and this way
     # the restore is an exact inverse of the move that created the stash.
     slot = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
+    live = default_slot_dir()
+    if live is not None and live != slot:
+        _rmtree_retry(live)  # a fresh sign-in may have migrated to a newer layout
     if slot.is_dir():
         _rmtree_retry(slot)  # the throwaway fresh session; raises if still locked
     _move_retry(backup, slot)
@@ -647,7 +642,7 @@ def adopt_default_into(name: str) -> None:
     slot = default_slot_dir()
     if slot is None or not slot.is_dir():
         raise RuntimeError("No default-slot state to adopt.")
-    profile = PROFILES_DIR / name
+    profile = _profile_path(name)
     if profile.exists():
         _rmtree_retry(profile)
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
@@ -688,6 +683,7 @@ def shortcut_filename(name: str) -> str:
 
 
 def create_shortcut(name: str, exe: Path | None = None) -> Path:
+    _profile_path(name)
     exe = exe or find_app_exe()
     lnk = desktop_dir() / shortcut_filename(name)
     target, args = _launcher_invocation(name)
@@ -711,6 +707,7 @@ def create_shortcut(name: str, exe: Path | None = None) -> Path:
     subprocess.run(
         ["powershell", "-NoProfile", "-Command", script],
         env=env, capture_output=True, text=True, creationflags=NO_WINDOW,
+        check=True, timeout=20,
     )
     return lnk
 
