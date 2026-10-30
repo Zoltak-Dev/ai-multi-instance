@@ -21,6 +21,10 @@ from typing import Any
 
 
 PUBLISHER_HASH = "pzs8sxrjxfjjc"
+# Left behind in the OLD location when the app relocates its userData.
+RELOCATION_MARKER_PREFIX = ".user-data-left"
+# Entries that exist only inside a userData dir the app has actually used.
+USERDATA_MARKERS = ("Local State", "Preferences", "Network")
 AUTH_KEY_PARTS = ("account", "auth", "login", "oauth", "session", "token")
 UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
@@ -91,19 +95,63 @@ def _process_summary() -> dict[str, int]:
     return summary
 
 
-def _default_slot(packages: list[dict[str, str]]) -> tuple[Path, str]:
+def _has_relocation_marker(path: Path) -> bool:
+    """True when the app has MOVED OUT of `path`, leaving a marker behind."""
+    try:
+        return path.is_dir() and any(
+            child.name.startswith(RELOCATION_MARKER_PREFIX) for child in path.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _is_live_userdata(path: Path) -> bool:
+    """True only when `path` holds real userData. A directory existing at the
+    expected address is NOT sufficient: Claude 3.x relocated the default
+    userData and left the old directory in place holding only a zero-byte
+    `.user-data-left.<family>` marker, so an existence check reports the
+    profile is present at a path it has just moved out of."""
+    if not path.is_dir() or _has_relocation_marker(path):
+        return False
+    return any((path / marker).exists() for marker in USERDATA_MARKERS)
+
+
+def _slot_candidates(packages: list[dict[str, str]]) -> list[tuple[Path, str]]:
+    """Every layout the default slot could use, most recent first."""
     local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    for package in packages:
-        family = package.get("family", "")
-        if family:
-            root = local / "Packages" / family
-            if root.is_dir():
-                return root / "LocalCache" / "Roaming" / "Claude", "packaged"
-    known = local / "Packages" / f"Claude_{PUBLISHER_HASH}"
-    if known.is_dir():
-        return known / "LocalCache" / "Roaming" / "Claude", "packaged-known-family"
     roaming = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    return roaming / "Claude", "unpackaged-fallback"
+    families = [p["family"] for p in packages if p.get("family")]
+    families.append(f"Claude_{PUBLISHER_HASH}")
+
+    ordered: list[tuple[Path, str]] = []
+    for family in families:
+        ordered.append((local / "Claude-Data" / family.lower(), "relocated-3x"))
+    for family in families:
+        ordered.append(
+            (local / "Packages" / family / "LocalCache" / "Roaming" / "Claude", "packaged")
+        )
+    ordered.append((roaming / "Claude", "unpackaged"))
+
+    seen: set[Path] = set()
+    unique: list[tuple[Path, str]] = []
+    for path, kind in ordered:
+        if path not in seen:
+            seen.add(path)
+            unique.append((path, kind))
+    return unique
+
+
+def _default_slot(packages: list[dict[str, str]]) -> tuple[Path, str]:
+    """The slot that actually holds userData, by probing rather than by
+    assuming an address."""
+    candidates = _slot_candidates(packages)
+    for path, kind in candidates:
+        if _is_live_userdata(path):
+            return path, kind
+    for path, kind in candidates:
+        if _has_relocation_marker(path):
+            return path, f"{kind}-but-app-moved-out"
+    return candidates[0][0], "none-found"
 
 
 def _safe_key(name: str) -> str:
@@ -256,6 +304,14 @@ def main() -> int:
     print(f"processes={json.dumps(_process_summary(), sort_keys=True)}")
     print(f"slot_kind={slot_kind}")
     print(f"slot_exists={slot.is_dir()}")
+    print(f"slot={slot}")
+    # Every layout considered, so a wrong answer is visible rather than implied.
+    for path, kind in _slot_candidates(packages):
+        print(
+            f"candidate[{kind}] exists={path.is_dir()} "
+            f"live={_is_live_userdata(path)} moved_out={_has_relocation_marker(path)} "
+            f"path={path}"
+        )
     _print_config("initial", config)
     _print_cookies("initial", cookies)
     print(f"initial.disk_session={_disk_session_state(slot)}")

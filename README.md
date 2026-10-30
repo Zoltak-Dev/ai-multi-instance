@@ -13,6 +13,8 @@ The interface is arrow-key driven: move the highlight with `↑`/`↓`, then pre
 
 Windows 10+ and the Claude and/or Codex desktop app installed.
 
+**Verified against:** Claude Desktop `3.1623.4.0` on Windows 11 build `26300`, 22 Oct 2026. This tool depends on where the desktop app stores its user data, which the app has relocated once already without notice — if your Claude version is much newer than that date, run `python diagnose_login.py --duration 0` first and check that the reported `slot` is a directory holding real data.
+
 **From source (recommended)** — requires Python 3.9+:
 
 ```powershell
@@ -61,9 +63,11 @@ Codex behaves differently. Its `bootstrap.js` calls `app.setPath('userData', ...
 
 ## Signing in to a profile
 
-A profile instance can never complete a sign-in on its own: the sign-in callback (`claude://…` — email magic link or Google OAuth alike) is delivered by Windows to the MSIX package, which always activates the **default** app instance, never a profile. Redirecting the protocol per profile is not possible on current Windows — the UCPD driver ignores programmatic `UserChoice` registry writes, and MSIX protocol activation bypasses the registry entirely.
+A profile instance can never complete a sign-in on its own: the sign-in callback (`claude://…` — email magic link or Google OAuth alike) is delivered by Windows to a freshly spawned process that always resolves to the **default** app instance, never a profile. The UCPD driver ignores programmatic `UserChoice` registry writes, so this tool cannot redirect the protocol for you — which is why it uses the snapshot approach below instead.
 
-(A subtlety: the default instance thinks its data lives in `%APPDATA%\Claude`, but MSIX filesystem virtualization redirects it to `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude` — that folder is what actually gets moved around below.)
+Redirecting the protocol per profile *is* achievable, but only by hand: a `UserChoice` written by the user through **Settings → Apps → Default apps → URL:claude** is not reverted by UCPD, because the protection applies to programmatic writes rather than to the user's own choice. Measured on Windows 11 build 26300 with UCPD running. If you want that route instead of snapshots, the relevant key is `HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\claude\UserChoice` — note `Shell\Associations`, not `Explorer\UrlAssociations`, which is for file-extension associations and does not exist for a URL scheme.
+
+(A subtlety: the default instance's data has lived in three different places across versions, so this tool **probes** for it rather than assuming an address — see [Known limitations](#known-limitations). Claude 3.x keeps it in `%LOCALAPPDATA%\Claude-Data\<family>`; Claude 1.x kept it inside the MSIX container at `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude`; an unpackaged install uses the plain `%APPDATA%\Claude`. Whichever one actually holds a profile is what gets moved around below.)
 
 The tool works around this with a snapshot flow (press `2`, Claude only — also offered right after creating a profile):
 
@@ -98,6 +102,18 @@ The rows adapt to the account: whatever rolling windows it exposes (`5h`, `7d`, 
 - **Codex** reads each profile's ChatGPT token from `<profile>/.codex/auth.json` and queries the `codex/usage` endpoint — no quota spent.
 
 Both are per account, need no extra logins, and use only the Python standard library.
+
+## Known limitations
+
+**If you are on `v2.0.0` or earlier and running Claude Desktop 3.x, do not use the sign-in snapshot.** Those releases resolve the default user-data directory by address and test only that a directory exists there. Claude 3.x moved that directory and left the old one in place holding a single zero-byte `.user-data-left.<family>` marker, so the check passes against a folder the app has moved out of. The result is silent: the tool sets aside an empty directory and reports success, the "fresh" sign-in lands in your existing default profile, and the new profile is created empty. Nothing is deleted — the real data is never addressed at all — but nothing is isolated either, and you lose the session you were signed in to. Current `main` probes for a directory that actually contains a profile, and refuses to continue if it finds a relocation marker and no live profile.
+
+**The sign-in snapshot moves your real profile directory.** It is a rename, not a copy, and it is the mechanism the tool is built on. A stash is never deleted until it has been renamed back into place, and an interrupted run leaves it on disk for recovery — but close the app before running it, and do not interrupt it mid-flow.
+
+**Profiles are isolation, not a sandbox.** Windows DPAPI is scoped to the Windows user rather than to the folder, so any profile's stored secrets stay readable by anything running as you. Separate accounts, same trust boundary.
+
+**Codex has no sign-in snapshot.** The flow requires a known user-data directory; Codex authenticates differently and only profile launching is supported there.
+
+**Only one instance owns the `claude://` protocol at a time.** That is a Windows constraint rather than a tool one, and it is why sign-in needs the snapshot dance at all.
 
 ## Build
 
