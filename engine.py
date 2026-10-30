@@ -349,9 +349,14 @@ def launch_profile(name: str, exe: Path | None = None) -> None:
         raise RuntimeError(f"{_current.display} not found. Is the desktop app installed?")
     data_dir = PROFILES_DIR / name
     data_dir.mkdir(parents=True, exist_ok=True)
+    env = profile_env(name)
+    if _current is CODEX:
+        cli = exe.parent / "resources" / "codex.exe"
+        if cli.is_file():
+            env["CODEX_CLI_PATH"] = str(cli)
     subprocess.Popen(
         [str(exe), f"--user-data-dir={data_dir}"],
-        env=profile_env(name),
+        env=env,
         creationflags=DETACHED_FLAGS, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
