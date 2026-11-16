@@ -1,5 +1,21 @@
 # Changelog
 
+[Release instructions](.github/signpath/SETUP.md#publish-a-windows-release)
+
+## Unreleased
+
+## v2.1.0 — Shared history and live usage
+
+<!-- source-only -->
+
+- Add Shared history for Codex. Switch accounts in the main window while keeping local chats, or open separate windows in Isolated profiles. Confirm switches that close the current window.
+- Add cancellable Codex browser sign-in and improve Claude sign-in recovery.
+- Protect existing Claude data when more than one profile location is in use.
+- Show remaining quotas in the menu and fetch current limits in Usage. Save the name or quota sort order across restarts.
+- Improve desktop shortcuts, including a shortcut to the manager. Close instances in the background so the menu stays responsive.
+- Check Git clones and GitHub ZIP downloads for changes to the program files. Offer fast-forward updates for clean clones of the official repository.
+- Move profile manager settings and caches into `data/` and migrate existing files on startup.
+
 ## v2.0.1 — 2026-10-30
 
 - Integrate #6: use Codex's bundled CLI to avoid package-identity startup errors. Thanks @nchiari.

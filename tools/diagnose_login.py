@@ -38,9 +38,10 @@ def _powershell_json(script: str) -> Any:
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); " + script],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=15,
             creationflags=flags,
             check=False,

@@ -2,20 +2,27 @@
 
 State lives next to this file:
   <App.profiles_dirname>/<name>/  -> --user-data-dir for each profile
-  state.json                       -> selected app + active profile per app
+  data/state.json                  -> selected app, Codex launch mode, launch counter
 """
 from __future__ import annotations
 
+import base64
 import errno
 import json
+import msvcrt
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 
 
@@ -90,13 +97,18 @@ def _app_dir() -> Path:
 
 
 PROJECT_DIR = _app_dir()
+RUNTIME_DIR = PROJECT_DIR / "data"
 LAUNCHER = PROJECT_DIR / "launcher.pyw"
 LAUNCHER_EXE = PROJECT_DIR / "launcher.exe"
-STATE_FILE = PROJECT_DIR / "state.json"
+STATE_FILE = RUNTIME_DIR / "state.json"
+MANAGER_VERSION = "2.1.0"
+_GITHUB_REPO = "Zoltak-Dev/ai-multi-instance"
+_GITHUB_URL = f"https://github.com/{_GITHUB_REPO}"
+_SOURCE_ARCHIVE_REVISION = "$Format:%H$"
+_SOURCE_UPDATE_FILES = {"main.py", "engine.py", "usage.py", "launcher.pyw"}
 
 
 # --- Consolidated state (state.json) -------------------------------------- #
-# Schema:  { "selected_app": "claude"|"codex" }
 def _load_state() -> dict:
     try:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -106,10 +118,26 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    try:
-        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    _write_atomic(STATE_FILE, json.dumps(state, indent=2).encode("utf-8"))
+
+
+@contextmanager
+def file_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as lock:
+        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        yield
+
+
+def sort_by_usage() -> bool:
+    return _load_state().get("sort_by_usage") is True
+
+
+def set_sort_by_usage(enabled: bool) -> None:
+    with file_lock(STATE_FILE.with_suffix(".lock")):
+        state = _load_state()
+        state["sort_by_usage"] = enabled
+        _save_state(state)
 
 
 # Current app (mutable via set_app). PROFILES_DIR mirrors it for cleaner reads.
@@ -126,9 +154,13 @@ def set_app(app: App, *, persist: bool = True) -> None:
     _current = app
     PROFILES_DIR = PROJECT_DIR / app.profiles_dirname
     if persist:
-        state = _load_state()
-        state["selected_app"] = app.key
-        _save_state(state)
+        try:
+            with file_lock(STATE_FILE.with_suffix(".lock")):
+                state = _load_state()
+                state["selected_app"] = app.key
+                _save_state(state)
+        except OSError:
+            pass
 
 
 def _restore_selected_app() -> None:
@@ -137,7 +169,76 @@ def _restore_selected_app() -> None:
         set_app(APPS[key], persist=False)
 
 
-_restore_selected_app()
+def initialize_runtime() -> None:
+    """Move the old root-level files before the manager starts using them."""
+    names = ("state.json", "usage_cache.json", "launch-count.db")
+    if any((PROJECT_DIR / name).is_file() and not (RUNTIME_DIR / name).exists() for name in names):
+        with file_lock(STATE_FILE.with_suffix(".lock")):
+            for name in names:
+                old = PROJECT_DIR / name
+                new = RUNTIME_DIR / name
+                if old.is_file() and not new.exists():
+                    old.rename(new)
+            if not (PROJECT_DIR / "state.json").exists():
+                try:
+                    (PROJECT_DIR / "state.lock").unlink(missing_ok=True)
+                except OSError:
+                    pass
+    _restore_selected_app()
+
+
+def _load_launch_state() -> dict:
+    state = _load_state()
+    legacy = STATE_FILE.with_name("launch-count.db")
+    if "launch_count" in state or not legacy.is_file():
+        return state
+
+    # Read the old counter once. All subsequent launches use state.json only.
+    import sqlite3
+    from contextlib import closing
+
+    try:
+        with closing(sqlite3.connect(f"{legacy.resolve().as_uri()}?mode=ro", uri=True, timeout=1)) as db:
+            count, shown = db.execute("SELECT count, shown FROM launches WHERE id = 1").fetchone() or (0, 0)
+    except sqlite3.Error as exc:
+        raise OSError("Could not read the old launch counter.") from exc
+    state.update(launch_count=count, donation_milestone=shown)
+    _save_state(state)
+    try:
+        legacy.unlink()
+    except OSError:
+        pass
+    return state
+
+
+def _counter_value(state: dict, key: str) -> int:
+    value = state.get(key)
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _record_launch() -> None:
+    try:
+        with file_lock(STATE_FILE.with_suffix(".lock")):
+            state = _load_launch_state()
+            state["launch_count"] = _counter_value(state, "launch_count") + 1
+            _save_state(state)
+    except OSError:
+        pass
+
+
+def take_launch_milestone() -> int | None:
+    try:
+        with file_lock(STATE_FILE.with_suffix(".lock")):
+            state = _load_launch_state()
+            count = _counter_value(state, "launch_count")
+            milestone = count // 100
+            if milestone > _counter_value(state, "donation_milestone"):
+                state["donation_milestone"] = milestone
+                _save_state(state)
+                return count
+    except OSError:
+        pass
+    return None
 
 
 def _launcher_invocation(arg: str, app: App | None = None) -> tuple[str, str]:
@@ -164,8 +265,9 @@ def find_app_exe(refresh: bool = False, app: App | None = None) -> Path | None:
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
+             "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); "
              f"(Get-AppxPackage -Name {app.package_filter}).InstallLocation"],
-            capture_output=True, text=True, timeout=20, creationflags=NO_WINDOW,
+            capture_output=True, encoding="utf-8", timeout=20, creationflags=NO_WINDOW,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         out = ""
@@ -199,11 +301,183 @@ def app_version(exe: Path | None) -> str:
         return "?"
 
 
+def saved_client_versions() -> dict[App, str]:
+    state = _load_state()
+    versions: dict[App, str] = {}
+    for app in APPS.values():
+        version = state.get(f"{app.key}_client_version")
+        if isinstance(version, str) and re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+){3}|\?)?", version):
+            versions[app] = version
+    return versions
+
+
+def save_client_version(app: App, version: str) -> None:
+    key = f"{app.key}_client_version"
+    with file_lock(STATE_FILE.with_suffix(".lock")):
+        state = _load_state()
+        if state.get(key) != version:
+            state[key] = version
+            _save_state(state)
+
+
+def _github_data(endpoint: str) -> dict | list | None:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{_GITHUB_REPO}/{endpoint}",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": f"ai-multi-instance/{MANAGER_VERSION}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read())
+    except (HTTPException, OSError, ValueError):
+        return None
+
+
+def _windows_release_update() -> tuple[str, str] | None:
+    releases = _github_data("releases?per_page=30")
+    if not isinstance(releases, list):
+        return None
+    newest = tuple(map(int, MANAGER_VERSION.split(".")))
+    newest_tag = None
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+            continue
+        tag = release.get("tag_name")
+        if not isinstance(tag, str) or not re.fullmatch(r"v?[0-9]{1,8}\.[0-9]{1,8}\.[0-9]{1,8}", tag):
+            continue
+        version = tuple(map(int, tag.lstrip("v").split(".")))
+        assets = release.get("assets")
+        zip_name = f"ai-multi-instance-v{tag.lstrip('v')}-windows.zip"
+        if version > newest and isinstance(assets, list) and any(
+            isinstance(asset, dict) and asset.get("name") == zip_name for asset in assets
+        ):
+            newest, newest_tag = version, tag
+    if newest_tag is None:
+        return None
+    return f"Version {newest_tag}", f"{_GITHUB_URL}/releases/tag/{newest_tag}"
+
+
+def _source_file_hashes(revision: str) -> dict[str, str] | None:
+    tree = _github_data(f"git/trees/{revision}")
+    if not isinstance(tree, dict) or tree.get("truncated"):
+        return None
+    entries = tree.get("tree")
+    if not isinstance(entries, list):
+        return None
+    files = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        path = entry.get("path")
+        if not isinstance(path, str):
+            return None
+        if path not in _SOURCE_UPDATE_FILES:
+            continue
+        sha = entry.get("sha")
+        if entry.get("type") != "blob" or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return None
+        files[path] = sha
+    return files
+
+
+def _git(*args: str, timeout: int = 3) -> str:
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never")
+    return subprocess.run(
+        ["git", *args], cwd=PROJECT_DIR, check=True, stdin=subprocess.DEVNULL,
+        capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
+        creationflags=NO_WINDOW, env=env,
+    ).stdout.strip()
+
+
+def _source_update() -> tuple[str, str] | None:
+    head = _SOURCE_ARCHIVE_REVISION
+    if (PROJECT_DIR / ".git").exists():
+        try:
+            head = _git("rev-parse", "--verify", "HEAD")
+        except FileNotFoundError:
+            pass
+        except (OSError, subprocess.SubprocessError):
+            return None
+        else:
+            if not re.fullmatch(r"[0-9a-f]{40}", head):
+                return None
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        head = f"v{MANAGER_VERSION}"
+    comparison = _github_data(f"compare/main...{head}?per_page=1")
+    if not isinstance(comparison, dict) or comparison.get("status") not in ("behind", "diverged"):
+        return None
+    base = comparison.get("base_commit")
+    upstream = base.get("sha") if isinstance(base, dict) else None
+    if not isinstance(upstream, str) or not re.fullmatch(r"[0-9a-f]{40}", upstream):
+        return None
+    upstream_files = _source_file_hashes(upstream)
+    if upstream_files is None:
+        return None
+    installed_files = _source_file_hashes(head)
+    if installed_files is None or installed_files == upstream_files:
+        return None
+    label = f"Source commit {upstream[:7]}"
+    if head.startswith("v"):
+        label += f" (after {head})"
+    return label, f"{_GITHUB_URL}/compare/{head}...main"
+
+
+def check_update() -> tuple[str, str] | None:
+    return _windows_release_update() if getattr(sys, "frozen", False) else _source_update()
+
+
+def update_download_url(release_url: str) -> str:
+    if getattr(sys, "frozen", False):
+        return release_url.replace("/releases/tag/", "/releases/expanded_assets/", 1)
+    return _GITHUB_URL
+
+
+def can_auto_update() -> bool:
+    return (not getattr(sys, "frozen", False) and (PROJECT_DIR / ".git").exists()
+            and shutil.which("git") is not None)
+
+
+def _require_clean_main() -> None:
+    if _git("branch", "--show-current") != "main":
+        raise RuntimeError("Switch to the main branch to update automatically.")
+    if _git("status", "--porcelain", "--untracked-files=normal"):
+        raise RuntimeError("Resolve your local changes before updating.")
+
+
+def apply_source_update() -> None:
+    """Fast-forward the manager's Git checkout after the user chooses Update."""
+    if not can_auto_update():
+        raise RuntimeError("Automatic updates require a Git checkout and Git.")
+    official_remotes = (_GITHUB_URL, f"git@github.com:{_GITHUB_REPO}",
+                        f"ssh://git@github.com/{_GITHUB_REPO}")
+    try:
+        if Path(_git("rev-parse", "--show-toplevel")).resolve() != PROJECT_DIR.resolve():
+            raise RuntimeError("Git's working directory does not match this installation.")
+        origin = _git("remote", "get-url", "origin").lower().rstrip("/").removesuffix(".git")
+        if origin not in {url.lower() for url in official_remotes}:
+            raise RuntimeError("Set origin to the official GitHub repository to update automatically.")
+        _require_clean_main()
+        _git("fetch", "--no-tags", "--no-recurse-submodules", "origin", "refs/heads/main", timeout=45)
+        upstream = _git("rev-parse", "--verify", "FETCH_HEAD^{commit}")
+        if not re.fullmatch(r"[0-9a-f]{40}", upstream):
+            raise RuntimeError("Git could not verify the update commit.")
+        _require_clean_main()
+        try:
+            _git("merge-base", "--is-ancestor", "HEAD", upstream)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("Your local main branch cannot be fast-forwarded to GitHub.") from exc
+        _git("merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", upstream, timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("The Git update timed out. Try again.") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("Git could not finish the update. Check the repository and try again.") from exc
+
+
 # --- Profiles ------------------------------------------------------------- #
-def list_profiles() -> list[Path]:
-    if not PROFILES_DIR.is_dir():
+def list_profiles(profiles_dir: Path | None = None) -> list[Path]:
+    profiles_dir = profiles_dir or PROFILES_DIR
+    if not profiles_dir.is_dir():
         return []
-    return sorted((d for d in PROFILES_DIR.iterdir() if d.is_dir()),
+    return sorted((d for d in profiles_dir.iterdir() if d.is_dir()),
                   key=lambda p: p.name.lower())
 
 
@@ -216,12 +490,13 @@ def valid_profile_name(name: str) -> bool:
             and name.split(".", 1)[0].rstrip().upper() not in reserved)
 
 
-def _profile_path(name: str) -> Path:
+def _profile_path(name: str, profiles_dir: Path | None = None) -> Path:
     if not valid_profile_name(name):
         raise ValueError(f"Invalid profile name: {name!r}")
-    profile = PROFILES_DIR / name
-    if profile.is_symlink() or profile.resolve().parent != PROFILES_DIR.resolve():
-        raise ValueError(f"Profile must be a directory inside {PROFILES_DIR}")
+    profiles_dir = profiles_dir or PROFILES_DIR
+    profile = profiles_dir / name
+    if profile.is_symlink() or profile.resolve().parent != profiles_dir.resolve():
+        raise ValueError(f"Profile must be a directory inside {profiles_dir}")
     return profile
 
 
@@ -257,42 +532,69 @@ def delete_profile(name: str) -> None:
             pass
 
 
+def _rename_conflicts(src: Path, dst: Path) -> bool:
+    # Windows resolves a case-only rename to the existing item.
+    return dst.is_symlink() or (dst.exists() and not (src == dst and src.exists() and src.samefile(dst)))
+
+
 def rename_profile(old: str, new: str) -> None:
     src, dst = _profile_path(old), _profile_path(new)
     if old == new:
         return
     if not src.is_dir():
         raise FileNotFoundError(f"Profile not found: {old}")
-    if dst.exists():
+    if _rename_conflicts(src, dst):
         raise FileExistsError(f"A profile named {new!r} already exists.")
-    src.rename(dst)
 
-    if shortcut_exists(old):
-        delete_shortcut(old)
-        create_shortcut(new)
+    desktop = desktop_dir()
+    old_link, new_link = desktop / shortcut_filename(old), desktop / shortcut_filename(new)
+    if _rename_conflicts(old_link, new_link):
+        raise FileExistsError(f"A desktop item named {new_link.name!r} already exists.")
+    if old_link.is_symlink() or (old_link.exists() and not old_link.is_file()):
+        raise ValueError(f"{old_link.name!r} is not a shortcut file.")
+    original = old_link.read_bytes() if old_link.is_file() else None
+
+    src.rename(dst)
+    if original is None:
+        return
+    try:
+        _save_shortcut(old_link, *_launcher_invocation(new), replace=True)
+        old_link.rename(new_link)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            if old_link.is_file() and old_link.read_bytes() != original:
+                old_link.write_bytes(original)
+        finally:
+            dst.rename(src)
+        raise
+    _notify_shortcut_rename(old_link, new_link)
 
 
 # --- Running processes ---------------------------------------------------- #
-def _processes(exe_name: str) -> list[tuple[int, str, str]]:
-    """Return (pid, executable path, command line) for every running process
-    named `exe_name`."""
+def _processes(*apps: App) -> list[tuple[App, int, str, str]]:
+    """Read process details for the requested apps in one Windows query."""
+    by_name = {app.exe_name.lower(): app for app in apps}
+    filter_expr = " OR ".join(f"Name='{app.exe_name}'" for app in apps)
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             f"Get-CimInstance Win32_Process -Filter \"Name='{exe_name}'\" "
-             "| ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)|$($_.CommandLine)\" }"],
-            capture_output=True, text=True, timeout=10, creationflags=NO_WINDOW,
+             "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); "
+             f'Get-CimInstance Win32_Process -Filter "{filter_expr}" -ErrorAction Stop '
+             '| ForEach-Object { "$($_.Name)|$($_.ProcessId)|$($_.ExecutablePath)|$($_.CommandLine)" }'],
+            capture_output=True, encoding="utf-8", timeout=10, creationflags=NO_WINDOW, check=True,
         )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    procs: list[tuple[int, str, str]] = []
+    except (OSError, subprocess.SubprocessError) as exc:
+        names = " or ".join(app.display for app in apps)
+        raise RuntimeError(f"Could not check which {names} instances are running. Try again.") from exc
+    procs: list[tuple[App, int, str, str]] = []
     for line in out.stdout.splitlines():
-        pid_str, sep, rest = line.partition("|")
-        pid_str = pid_str.strip()
-        if not sep or not pid_str.isdigit():
+        parts = line.split("|", 3)
+        if len(parts) != 4:
             continue
-        exe_path, _, cmd = rest.partition("|")
-        procs.append((int(pid_str), exe_path, cmd))
+        name, pid_str, exe_path, cmd = parts
+        app = by_name.get(name.lower())
+        if app is not None and pid_str.strip().isdigit():
+            procs.append((app, int(pid_str), exe_path, cmd))
     return procs
 
 
@@ -321,28 +623,51 @@ def _user_data_dir(command: str) -> Path | None:
     return Path(value) if value else None
 
 
-def running_profiles() -> dict[str, list[int]]:
-    """Return {profile_name: [pids]} for processes of the current app using
-    one of our --user-data-dir paths."""
-    result: dict[str, list[int]] = {}
-    profiles_root = str(PROFILES_DIR).lower()
+InstancePids = tuple[dict[str, list[int]], list[int]]
 
-    for pid, _exe, cmd in _processes(_current.exe_name):
+
+def _running_instances(roots: dict[App, Path]) -> dict[App, InstancePids]:
+    instances: dict[App, InstancePids] = {app: ({}, []) for app in roots}
+    for app, pid, exe_path, cmd in _processes(*roots):
+        profiles, main = instances[app]
         data = _user_data_dir(cmd)
         if data is None:
-            continue
-        try:
-            parent = str(data.parent).lower()
-        except OSError:
-            continue
-        if parent != profiles_root:
-            continue
-        result.setdefault(data.name, []).append(pid)
-    return result
+            if "--type=" not in cmd.lower() and _is_packaged_exe(exe_path, app):
+                main.append(pid)
+        elif data.parent == roots[app]:
+            profiles.setdefault(data.name, []).append(pid)
+    return instances
+
+
+def running_instances(app: App | None = None) -> InstancePids:
+    """Return isolated profile PIDs and main-instance PIDs for one app."""
+    if app is None:
+        app, profiles_root = _current, PROFILES_DIR
+    else:
+        profiles_root = PROJECT_DIR / app.profiles_dirname
+    return _running_instances({app: profiles_root})[app]
+
+
+def all_running_instances() -> dict[App, InstancePids]:
+    return _running_instances({app: PROJECT_DIR / app.profiles_dirname for app in APPS.values()})
+
+
+def running_profiles() -> dict[str, list[int]]:
+    return running_instances()[0]
 
 
 def close_profile(name: str) -> int:
     return _kill_pids(running_profiles().get(name, []))
+
+
+def close_instances(app: App, names: list[str] | None) -> int:
+    profiles, main = running_instances(app)
+    if names is None:
+        return _kill_pids(main)
+    pids = [pid for name in names for pid in profiles.get(name, [])]
+    if main and app is CODEX and main_codex_profile(PROJECT_DIR / app.profiles_dirname) in names:
+        pids.extend(main)
+    return _kill_pids(pids)
 
 
 def profile_env(name: str) -> dict[str, str]:
@@ -375,6 +700,396 @@ def launch_profile(name: str, exe: Path | None = None) -> None:
         creationflags=DETACHED_FLAGS, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+
+
+# --- Codex account switching ---------------------------------------------- #
+
+def shared_codex_history() -> bool:
+    return _current is CODEX and _load_state().get("codex_shared_history", True) is True
+
+
+def toggle_codex_history() -> bool:
+    with _codex_switch_lock(), file_lock(STATE_FILE.with_suffix(".lock")):
+        state = _load_state()
+        shared = state.get("codex_shared_history", True) is not True
+        state["codex_shared_history"] = shared
+        main = codex_main_home() / "auth.json"
+        detached = None if shared else _detach_main_codex_profile(main)
+        try:
+            _save_state(state)
+        except OSError:
+            if detached is not None:
+                data, mtime = detached
+                _write_atomic(main, data, mtime_ns=mtime)
+            raise
+        return shared
+
+
+def attach_codex_profile(name: str) -> None:
+    """Load a saved login into Codex's closed main slot."""
+    with _codex_switch_lock():
+        if not shared_codex_history():
+            raise RuntimeError("Switch to Shared history before attaching a profile.")
+        target, data, identity = _read_profile_login(name)
+        main = codex_main_home() / "auth.json"
+        try:
+            previous, active = _codex_auth(main)
+        except FileNotFoundError:
+            previous, active = None, None
+        else:
+            if active is None:
+                raise RuntimeError("Shared history mode requires a ChatGPT login on the main Codex profile.")
+            if _match_main_codex_profile(previous, active) is not None:
+                raise RuntimeError("A profile is already loaded in the main Codex instance.")
+
+        running, main_pids = running_instances()
+        if main_pids:
+            raise RuntimeError("Close the main Codex instance first, then try again.")
+        matches = list(_matching_codex_profiles(identity))
+        if any(other.casefold() != name.casefold() and saved == data for other, _, saved in matches):
+            raise RuntimeError("Another profile has the same Codex login. Sign in again before attaching.")
+        _check_codex_profiles_closed(matches, running)
+        if previous is not None and active is not None:
+            _save_outgoing_codex_auth(previous, active, main, running)
+        mtime = target.stat().st_mtime_ns
+        latest = main.read_bytes() if main.exists() else None
+        if latest != previous or target.read_bytes() != data:
+            raise RuntimeError("A Codex login changed while attaching the profile. Try again.")
+        _write_atomic(main, data, mtime_ns=mtime)
+
+
+def detach_codex_profile(*, expected_profile: str | None = None) -> bool:
+    """Remove the named account from Codex's main slot in shared-history mode."""
+    with _codex_switch_lock():
+        return shared_codex_history() and _detach_main_codex_profile(
+            codex_main_home() / "auth.json", expected_profile=expected_profile,
+        ) is not None
+
+
+def codex_main_home() -> Path:
+    return Path.home() / ".codex"
+
+
+def _write_atomic(path: Path, data: bytes, *, mtime_ns: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
+    pending = Path(temporary.name)
+    try:
+        with temporary:
+            temporary.write(data)
+        if mtime_ns is not None:
+            os.utime(pending, ns=(mtime_ns, mtime_ns))
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def _codex_auth(path: Path) -> tuple[bytes, tuple[str, str] | None]:
+    data = path.read_bytes()
+    try:
+        auth = json.loads(data)
+    except ValueError:
+        return data, None
+    return data, _codex_identity(auth)
+
+
+def _codex_identity(auth: object) -> tuple[str, str] | None:
+    try:
+        tokens = auth["tokens"]
+        if not all(tokens[key] for key in ("access_token", "refresh_token", "id_token")):
+            return None
+        payload = tokens["id_token"].split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        # Use signed-in user and workspace claims as a local lookup key only.
+        subject = claims.get("sub")
+        workspace = tokens.get("account_id") or ""
+        if isinstance(subject, str) and subject and isinstance(workspace, str):
+            return subject, workspace
+    except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+        pass
+    return None
+
+
+@contextmanager
+def _try_file_lock(path: Path, busy_message: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as lock:
+        lock.seek(0)
+        try:
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            raise RuntimeError(busy_message) from None
+        yield
+
+
+def _codex_switch_lock():
+    return _try_file_lock(codex_main_home() / ".multi-instance.lock",
+                          "Another Codex account operation is in progress.")
+
+
+def claude_snapshot_lock():
+    local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    return _try_file_lock(local / ".multi-instance-claude.lock",
+                          "A Claude sign-in or recovery is in progress in another window.")
+
+
+def _codex_default_env() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in ("CODEX_HOME", "CODEX_ELECTRON_USER_DATA_PATH", "CODEX_CLI_PATH"):
+        env.pop(key, None)
+    return env
+
+
+def _codex_profile_auth(name: str) -> Path:
+    profile = _profile_path(name)
+    if not profile.is_dir():
+        raise RuntimeError(f"Codex profile '{name}' does not exist.")
+    return profile / ".codex" / "auth.json"
+
+
+def codex_profile_has_auth(name: str) -> bool:
+    return _codex_profile_auth(name).is_file()
+
+
+def _matching_codex_profiles(
+    identity: tuple[str, str], profiles_dir: Path | None = None,
+) -> Iterator[tuple[str, Path, bytes]]:
+    for profile in list_profiles(profiles_dir):
+        try:
+            path = _profile_path(profile.name, profiles_dir) / ".codex" / "auth.json"
+            data, saved = _codex_auth(path)
+        except (OSError, ValueError):
+            continue
+        if saved == identity:
+            yield profile.name, path, data
+
+
+def main_codex_profile(profiles_dir: Path | None = None) -> str | None:
+    if profiles_dir is None and _current is not CODEX:
+        return None
+    try:
+        data, identity = _codex_auth(codex_main_home() / "auth.json")
+    except OSError:
+        return None
+    if identity is None:
+        return None
+    profile = _match_main_codex_profile(data, identity, profiles_dir)
+    return profile[0] if profile is not None else None
+
+
+def _match_main_codex_profile(
+    data: bytes, identity: tuple[str, str], profiles_dir: Path | None = None,
+) -> tuple[str, Path, bytes] | None:
+    matches = list(_matching_codex_profiles(identity, profiles_dir))
+    if len(matches) == 1:
+        return matches[0]
+    exact = [match for match in matches if match[2] == data]
+    return exact[0] if len(exact) == 1 else None
+
+
+def _detach_main_codex_profile(main: Path, *, expected_profile: str | None = None) -> tuple[bytes, int] | None:
+    try:
+        data, identity = _codex_auth(main)
+    except FileNotFoundError:
+        return None
+    if identity is None:
+        return None
+    match = _match_main_codex_profile(data, identity)
+    if match is None:
+        return None
+    name, target, saved = match
+    if expected_profile is not None and name != expected_profile:
+        raise RuntimeError("The profile loaded in the main Codex instance changed. Try again.")
+
+    running, main_pids = running_instances()
+    if main_pids:
+        raise RuntimeError("Close the main Codex instance first, then try again.")
+    if target.samefile(main):
+        raise RuntimeError(f"Profile '{name}' shares the main auth file. Use a separate profile first.")
+    mtime = main.stat().st_mtime_ns
+    if main.read_bytes() != data or target.read_bytes() != saved:
+        raise RuntimeError("A Codex login changed while detaching the profile. Try again.")
+    if data != saved and mtime > target.stat().st_mtime_ns:
+        _check_codex_profiles_closed((match,), running)
+        _write_atomic(target, data, mtime_ns=mtime)
+    main.unlink()
+    return data, mtime
+
+
+def sign_in_codex(name: str, *, cancelled: Callable[[], bool] | None = None) -> None:
+    target = _codex_profile_auth(name)
+    exe = find_app_exe()
+    cli = exe.parent / "resources" / "codex.exe" if exe else None
+    if cli is None or not cli.is_file():
+        raise RuntimeError("The bundled Codex CLI was not found.")
+    with _codex_switch_lock(), tempfile.TemporaryDirectory(prefix=".multi-instance-login-", dir=codex_main_home()) as temp:
+        if name in running_profiles():
+            raise RuntimeError(f"Close the isolated Codex profile '{name}' before signing in.")
+        env = _codex_default_env()
+        env["CODEX_HOME"] = temp
+        args = [str(cli), "login", "-c", 'cli_auth_credentials_store="file"']
+        with subprocess.Popen(args, env=env, stdin=subprocess.DEVNULL) as login:
+            try:
+                while login.poll() is None:
+                    if cancelled is not None and cancelled():
+                        raise KeyboardInterrupt
+                    time.sleep(0.1)
+            finally:
+                if login.returncode is None:
+                    login.kill()
+                    login.wait()
+            if login.returncode:
+                raise subprocess.CalledProcessError(login.returncode, args)
+        data, identity = _codex_auth(Path(temp) / "auth.json")
+        if identity is None:
+            raise RuntimeError("Codex did not return a ChatGPT account login.")
+        _write_atomic(target, data)
+
+
+def _check_codex_profiles_closed(matches: Iterable[tuple[str, Path, bytes]],
+                                 running: dict[str, list[int]]) -> None:
+    if not running:
+        return
+    for name, _, _ in matches:
+        if name in running:
+            raise RuntimeError(f"Close the isolated Codex profile '{name}' first.")
+
+
+def _latest_codex_profile(matches: list[tuple[str, Path, bytes]]) -> tuple[str, Path, bytes]:
+    return max(matches, key=lambda match: match[1].stat().st_mtime_ns)
+
+
+def _save_outgoing_codex_auth(data: bytes, identity: tuple[str, str], main: Path,
+                              running: dict[str, list[int]]) -> None:
+    matches = list(_matching_codex_profiles(identity))
+    if matches:
+        _, path, saved = _latest_codex_profile(matches)
+        if saved != data and main.stat().st_mtime_ns > path.stat().st_mtime_ns:
+            _check_codex_profiles_closed(matches, running)
+            _write_atomic(path, data)
+        return
+    name = "Original main account"
+    suffix = 2
+    while (PROFILES_DIR / name).exists():
+        name = f"Original main account {suffix}"
+        suffix += 1
+    _write_atomic(_profile_path(name) / ".codex" / "auth.json", data)
+
+
+def _read_profile_login(name: str) -> tuple[Path, bytes, tuple[str, str]]:
+    target = _codex_profile_auth(name)
+    try:
+        data, identity = _codex_auth(target)
+    except FileNotFoundError:
+        identity = None
+    if identity is None:
+        raise RuntimeError(f"Select '{name}' in the menu and press 2 to sign in first.")
+    return target, data, identity
+
+
+def launch_account(name: str, exe: Path | None = None, *,
+                   confirm_restart: Callable[[frozenset[int]], bool] | None = None) -> bool:
+    """Launch a named account using the selected history mode."""
+    if not _launch_account(name, exe, confirm_restart):
+        return False
+    _record_launch()
+    return True
+
+
+def _launch_account(name: str, exe: Path | None,
+                    confirm_restart: Callable[[frozenset[int]], bool] | None) -> bool:
+    if _current is not CODEX:
+        if not _profile_path(name).is_dir():
+            raise RuntimeError(f"{_current.display} profile '{name}' does not exist.")
+        launch_profile(name, exe=exe)
+        return True
+
+    with _codex_switch_lock():
+        target, data, identity = _read_profile_login(name)
+
+        main = codex_main_home() / "auth.json"
+        if not shared_codex_history():
+            _launch_isolated_codex(name, exe, target, identity, main)
+            return True
+
+        exe = exe or find_app_exe()
+        if exe is None:
+            raise RuntimeError("Codex desktop is not installed.")
+        running = running_profiles()
+        _check_codex_profiles_closed(_matching_codex_profiles(identity), running)
+        if main.is_file():
+            previous, active = _codex_auth(main)
+            if active is None:
+                raise RuntimeError("Shared history mode requires a ChatGPT login on the main Codex profile.")
+            if active == identity and (previous == data or main.stat().st_mtime_ns >= target.stat().st_mtime_ns):
+                launch_default_slot(exe)
+                return True
+        if close_default_slot(wait=20, confirm_restart=confirm_restart) is None:
+            return False
+        try:
+            previous, active = _codex_auth(main)
+            previous_mtime = main.stat().st_mtime_ns
+        except FileNotFoundError:
+            previous, active, previous_mtime = None, None, None
+        if active == identity and (previous == data or previous_mtime >= target.stat().st_mtime_ns):
+            launch_default_slot(exe)
+            return True
+        if previous is not None and active != identity:
+            if active is None:
+                raise RuntimeError("The main Codex login changed during the switch. Try again.")
+            _save_outgoing_codex_auth(previous, active, main, running)
+        _write_atomic(main, data)
+        try:
+            launch_default_slot(exe)
+        except OSError:
+            if previous is None:
+                main.unlink()
+            else:
+                _write_atomic(main, previous, mtime_ns=previous_mtime)
+            raise
+        return True
+
+
+def _launch_isolated_codex(name: str, exe: Path | None, target: Path,
+                           identity: tuple[str, str], main: Path) -> None:
+    if main.is_file():
+        _, active = _codex_auth(main)
+        if active == identity:
+            if default_slot_running():
+                raise RuntimeError("This account is running in the main Codex instance. Close it first.")
+            try:
+                data, active = _codex_auth(main)
+                mtime = main.stat().st_mtime_ns
+            except FileNotFoundError:
+                active = None
+            if active == identity and mtime > target.stat().st_mtime_ns and data != target.read_bytes():
+                _write_atomic(target, data, mtime_ns=mtime)
+    launch_profile(name, exe=exe)
+
+
+def launch_main() -> None:
+    _launch_main()
+    _record_launch()
+
+
+def _launch_main() -> None:
+    if _current is not CODEX:
+        launch_default_slot()
+        return
+
+    with _codex_switch_lock():
+        running, main_pids = running_instances()
+        main = codex_main_home() / "auth.json"
+        if not main_pids and main.is_file():
+            previous, identity = _codex_auth(main)
+            if identity is not None:
+                matches = list(_matching_codex_profiles(identity))
+                _check_codex_profiles_closed(matches, running)
+                if matches:
+                    _, path, data = _latest_codex_profile(matches)
+                    if data != previous and path.stat().st_mtime_ns > main.stat().st_mtime_ns:
+                        _write_atomic(main, data)
+        launch_default_slot()
 
 
 # --- Default-slot sign-in (snapshot model) --------------------------------- #
@@ -417,6 +1132,12 @@ def _is_live_userdata(path: Path) -> bool:
     if not path.is_dir() or _has_relocation_marker(path):
         return False
     return any((path / marker).exists() for marker in _USERDATA_MARKERS)
+
+
+def claude_profile_userdata(profile: Path) -> Path:
+    family = (CLAUDE.package_prefix + CLAUDE.publisher_hash).lower()
+    relocated = profile / ".localappdata" / "Claude-Data" / family
+    return relocated if _is_live_userdata(relocated) else profile
 
 
 def slot_candidates(app: App) -> list[Path]:
@@ -497,26 +1218,26 @@ def _is_packaged_exe(exe_path: str, app: App) -> bool:
 
 
 def default_slot_pids() -> list[int]:
-    """Main processes of the desktop app running on the default slot: the
-    packaged exe itself, with no --user-data-dir (so %APPDATA% state) and no
-    --type= (Chromium children)."""
-    pids: list[int] = []
-    for pid, exe_path, cmd in _processes(_current.exe_name):
-        if not _is_packaged_exe(exe_path, _current):
-            continue
-        low = cmd.lower()
-        if _user_data_dir(cmd) is None and "--type=" not in low:
-            pids.append(pid)
-    return pids
+    return running_instances()[1]
 
 
-def close_default_slot(*, wait: float = 0.0) -> int:
-    """Force-kill the default-slot processes. When `wait` > 0, block until they
-    are actually gone (or the timeout elapses) so the folder can be moved."""
-    n = _kill_pids(default_slot_pids())
+def close_default_slot(*, wait: float = 0.0,
+                       confirm_restart: Callable[[frozenset[int]], bool] | None = None) -> int | None:
+    """Close the default-slot processes, optionally requiring them to exit."""
+    pids = default_slot_pids()
+    if pids and confirm_restart is not None:
+        approved = frozenset(pids)
+        if not confirm_restart(approved):
+            return None
+        pids = default_slot_pids()
+        if pids and frozenset(pids) != approved:
+            raise RuntimeError("The main Codex window changed. Try switching again.")
+    n = _kill_pids(pids)
     if wait > 0:
         deadline = time.monotonic() + wait
-        while default_slot_pids() and time.monotonic() < deadline:
+        while default_slot_pids():
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"The main {_current.display} instance could not be closed.")
             time.sleep(0.5)
     return n
 
@@ -532,6 +1253,7 @@ def launch_default_slot(exe: Path | None = None) -> None:
         raise RuntimeError(f"{_current.display} not found. Is the desktop app installed?")
     subprocess.Popen(
         [str(exe)],
+        env=_codex_default_env() if _current is CODEX else None,
         creationflags=DETACHED_FLAGS, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
@@ -596,16 +1318,18 @@ def stash_default_slot() -> bool:
                 "Relocated: " + "; ".join(str(p) for p in moved)
             )
         return False
+    if any(candidate != slot and _is_live_userdata(candidate) for candidate in slot_candidates(_current)):
+        raise RuntimeError("Multiple Claude data folders are in use. Cannot start a fresh sign-in safely.")
     _move_retry(slot, backup)
     return True
 
 
-def restore_default_slot() -> None:
+def restore_default_slot(*, during_signin: bool = False) -> None:
     """Bring the stashed main session back, discarding whatever the sign-in flow
     left in the default location. No-op when there is no stash. The caller MUST
     have killed the fresh instance first, or the slot's files stay locked. The
-    backup is never removed until it is safely renamed into place, so a failure
-    here leaves the main session intact on disk for recovery."""
+    backup is kept until the rename succeeds. Recovery after interruption
+    preserves any alternate location whose origin is unknown."""
     backup = backup_dir()
     if backup is None or not backup.is_dir():
         return
@@ -618,7 +1342,9 @@ def restore_default_slot() -> None:
     slot = backup.with_name(backup.name[: -len(BACKUP_SUFFIX)])
     live = default_slot_dir()
     if live is not None and live != slot:
-        _rmtree_retry(live)  # a fresh sign-in may have migrated to a newer layout
+        if not during_signin:
+            raise RuntimeError(f"Claude data also exists at {live}. Move it aside before restoring {backup}.")
+        _rmtree_retry(live)  # The active sign-in may have created a new layout.
     if slot.is_dir():
         _rmtree_retry(slot)  # the throwaway fresh session; raises if still locked
     _move_retry(backup, slot)
@@ -643,10 +1369,30 @@ def adopt_default_into(name: str) -> None:
     if slot is None or not slot.is_dir():
         raise RuntimeError("No default-slot state to adopt.")
     profile = _profile_path(name)
-    if profile.exists():
-        _rmtree_retry(profile)
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-    _move_retry(slot, profile)
+    if not profile.exists():
+        _move_retry(slot, profile)
+        return
+
+    # Stage on the destination volume so the final moves cannot leave a partial copy.
+    staging = Path(tempfile.mkdtemp(prefix=".mi-adopt-", dir=PROFILES_DIR.resolve().parent))
+    fresh, previous = staging / "fresh", staging / "previous"
+    try:
+        _move_retry(slot, fresh)
+        try:
+            _move_retry(profile, previous)
+            _move_retry(fresh, profile)
+        except (OSError, KeyboardInterrupt):
+            if previous.exists():
+                try:
+                    _move_retry(previous, profile)
+                except OSError as exc:
+                    raise RuntimeError(f"Could not restore '{name}'. Its previous data is at {previous}.") from exc
+            raise
+        _rmtree_retry(previous)
+    finally:
+        if not previous.exists():
+            _rmtree_retry(staging)
 
 
 # --- Desktop shortcuts ---------------------------------------------------- #
@@ -654,21 +1400,15 @@ _desktop_cache: Path | None = None
 
 
 def desktop_dir() -> Path:
+    import ctypes
+
     global _desktop_cache
     if _desktop_cache is not None:
         return _desktop_cache
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "[Environment]::GetFolderPath('Desktop')"],
-            capture_output=True, text=True, creationflags=NO_WINDOW,
-        ).stdout.strip()
-        if out:
-            _desktop_cache = Path(out)
-            return _desktop_cache
-    except (OSError, subprocess.SubprocessError):
-        pass
-    _desktop_cache = Path.home() / "Desktop"
+    path = ctypes.create_unicode_buffer(260)
+    desktop_directory = 0x0010  # CSIDL_DESKTOPDIRECTORY
+    result = ctypes.windll.shell32.SHGetFolderPathW(None, desktop_directory, None, 0, path)
+    _desktop_cache = Path(path.value) if result == 0 and path.value else Path.home() / "Desktop"
     return _desktop_cache
 
 
@@ -682,26 +1422,25 @@ def shortcut_filename(name: str) -> str:
     return f"{_current.display} - {name}.lnk"
 
 
-def create_shortcut(name: str, exe: Path | None = None) -> Path:
-    _profile_path(name)
-    exe = exe or find_app_exe()
-    lnk = desktop_dir() / shortcut_filename(name)
-    target, args = _launcher_invocation(name)
+def _save_shortcut(lnk: Path, target: str, args: str, *,
+                   icon: Path | str | None = None, replace: bool = False) -> Path:
+    if not replace and os.path.lexists(lnk):
+        raise FileExistsError(f"A desktop item named {lnk.name!r} already exists.")
     env = dict(
         os.environ,
         SC_LNK=str(lnk),
         SC_TARGET=target,
         SC_ARGS=args,
         SC_WORK=str(PROJECT_DIR),
-        SC_ICON=str(exe) if exe else target,
+        SC_ICON=str(icon) if icon else "",
     )
     script = (
+        "$ErrorActionPreference='Stop';"
         "$w=New-Object -ComObject WScript.Shell;"
         "$s=$w.CreateShortcut($env:SC_LNK);"
         "$s.TargetPath=$env:SC_TARGET;"
         "$s.Arguments=$env:SC_ARGS;"
-        "$s.WorkingDirectory=$env:SC_WORK;"
-        "$s.IconLocation=$env:SC_ICON;"
+        "if ($env:SC_ICON) {$s.WorkingDirectory=$env:SC_WORK;$s.IconLocation=$env:SC_ICON};"
         "$s.Save()"
     )
     subprocess.run(
@@ -712,16 +1451,41 @@ def create_shortcut(name: str, exe: Path | None = None) -> Path:
     return lnk
 
 
+def _notify_shortcut_rename(old_link: Path, new_link: Path) -> None:
+    import ctypes
+
+    # Send a rename event so Explorer can reuse the existing icon position.
+    rename_item, path_w, flush_nowait = 0x00000001, 0x0005, 0x3000
+    notify = ctypes.windll.shell32.SHChangeNotify
+    notify.restype = None
+    notify(rename_item, path_w | flush_nowait, ctypes.c_wchar_p(str(old_link)), ctypes.c_wchar_p(str(new_link)))
+
+
+def create_shortcut(name: str, exe: Path | None = None) -> Path:
+    _profile_path(name)
+    lnk = desktop_dir() / shortcut_filename(name)
+    target, args = _launcher_invocation(name)
+    return _save_shortcut(lnk, target, args, icon=exe or find_app_exe() or target)
+
+
+def manager_shortcut_path() -> Path:
+    return desktop_dir() / "AI Multi-Instance.lnk"
+
+
+def create_manager_shortcut() -> Path:
+    target = sys.executable
+    args = "" if getattr(sys, "frozen", False) else subprocess.list2cmdline([str(PROJECT_DIR / "main.py")])
+    return _save_shortcut(manager_shortcut_path(), target, args, icon=target)
+
+
 def shortcut_exists(name: str) -> bool:
     return (desktop_dir() / shortcut_filename(name)).exists()
 
 
 def delete_shortcut(name: str) -> bool:
     lnk = desktop_dir() / shortcut_filename(name)
-    if not lnk.exists():
-        return False
     try:
         lnk.unlink()
-        return True
-    except OSError:
+    except FileNotFoundError:
         return False
+    return True

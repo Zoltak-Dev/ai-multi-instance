@@ -37,19 +37,22 @@ import base64
 import ctypes
 import hashlib
 import json
-import os
 import sqlite3
-import threading
+import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator
 from ctypes import POINTER, byref, c_char_p, c_ubyte, c_void_p, cast, create_string_buffer, sizeof
 from ctypes import wintypes
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from http.client import HTTPException
+from math import isfinite
 from pathlib import Path
+from queue import Empty, SimpleQueue
+from threading import Thread
 
-import engine  # single source of truth for PROJECT_DIR (no import cycle)
+import engine
 
 # --- CNG / DPAPI bindings -------------------------------------------------- #
 _bcrypt = ctypes.WinDLL("bcrypt")
@@ -241,8 +244,7 @@ def _read_claude_cookies(profile_dir: Path) -> dict[str, str]:
 # (DPAPI-encrypted, user-scoped — same protection level the browser uses) every
 # time the store is readable, and fall back to that cache while it is locked.
 # The sessionKey is a bearer token, so a cached one keeps working live.
-_CACHE_FILE = engine.PROJECT_DIR / "usage_cache.json"
-_CACHE_LOCK = threading.Lock()
+_CACHE_FILE = engine.RUNTIME_DIR / "usage_cache.json"
 
 
 def _load_cache() -> dict:
@@ -254,51 +256,55 @@ def _load_cache() -> dict:
 
 
 def _write_cache(cache: dict) -> None:
-    """Atomic write (temp + os.replace) so a concurrent reader never sees a
-    half-written file — fetch_all touches the cache from several threads."""
-    tmp = _CACHE_FILE.with_name(_CACHE_FILE.name + ".tmp")
+    engine._write_atomic(_CACHE_FILE, json.dumps(cache, indent=2).encode("utf-8"))
+
+
+def _cookie_file_id(profile: str) -> list[int] | None:
     try:
-        tmp.write_text(json.dumps(cache, indent=2), encoding="utf-8")
-        os.replace(tmp, _CACHE_FILE)
+        info = (Path(profile) / "Network" / "Cookies").stat()
     except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        return None
+    return [info.st_dev, info.st_ino, getattr(info, "st_birthtime_ns", info.st_ctime_ns)]
 
 
 def _cache_get_session(name: str) -> str | None:
     entry = _load_cache().get(name)
-    if not isinstance(entry, dict):
+    cookie_file = _cookie_file_id(name)
+    if not isinstance(entry, dict) or cookie_file is None or entry.get("cookie_file") != cookie_file:
         return None
     try:
         return _dpapi_unprotect(base64.b64decode(entry["session"])).decode("utf-8")
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError):
         return None
 
 
-def _cache_put_session(name: str, session_key: str) -> None:
+def _cache_put_session(name: str, session_key: str, cookie_file: list[int]) -> None:
     try:
         blob = base64.b64encode(_dpapi_protect(session_key.encode("utf-8"))).decode("ascii")
+        with engine.file_lock(_CACHE_FILE.with_suffix(".lock")):
+            cache = _load_cache()
+            cache[name] = {"session": blob, "cookie_file": cookie_file}
+            _write_cache(cache)
     except OSError:
-        return
-    with _CACHE_LOCK:
-        cache = _load_cache()
-        cache[name] = {"session": blob}
-        _write_cache(cache)
+        pass
 
 
 def _cache_drop(name: str) -> None:
-    with _CACHE_LOCK:
-        cache = _load_cache()
-        if cache.pop(name, None) is not None:
-            _write_cache(cache)
+    try:
+        with engine.file_lock(_CACHE_FILE.with_suffix(".lock")):
+            cache = _load_cache()
+            if name in cache:
+                del cache[name]
+                _write_cache(cache)
+    except OSError:
+        pass
 
 
 def _read_session(profile_dir: Path) -> tuple[str, str | None, str | None]:
     """Resolve the auth for a profile. Returns ``(status, sessionKey, cf_clearance)``:
       * ``"live"``   — read straight from the profile's own cookie store
       * ``"locked"`` — store present but locked (the instance is running)
+      * ``"unreadable"`` — invalid cookie or encryption data
       * ``"absent"`` — no store / not signed in
     """
     if not (profile_dir / "Network" / "Cookies").is_file() or not (profile_dir / "Local State").is_file():
@@ -308,7 +314,7 @@ def _read_session(profile_dir: Path) -> tuple[str, str | None, str | None]:
     except (sqlite3.Error, OSError):
         return "locked", None, None
     except (ValueError, KeyError, TypeError):
-        return "absent", None, None
+        return "unreadable", None, None
     session = jar.get("sessionKey")
     if not session:
         return "absent", None, None
@@ -325,10 +331,10 @@ _USAGE_URL = "https://claude.ai/api/organizations/{org}/usage"
 def _api_get(url: str, cookie_header: str, timeout: float = 20.0):
     req = urllib.request.Request(url, headers={
         "User-Agent": _UA,
-        "Cookie": cookie_header,
         "Accept": "*/*",
         "Referer": "https://claude.ai/",
     })
+    req.add_unredirected_header("Cookie", cookie_header)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
@@ -341,15 +347,21 @@ def _pick_org(orgs: list[dict]) -> dict:
 
 
 def _account_label(org_name: str) -> str:
-    name = (org_name or "").strip()
+    name = org_name.strip() if isinstance(org_name, str) else ""
     for suffix in ("'s Organization", "’s Organization"):
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return name or "—"
 
 
-def _utilization(node) -> float | None:
-    return node.get("utilization") if isinstance(node, dict) else None
+def _percent(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        percent = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return percent if isfinite(percent) else None
 
 
 @dataclass
@@ -364,6 +376,120 @@ class ProfileUsage:
     error: str = ""
     account: str = ""
     rows: list[tuple[str, float, str]] = field(default_factory=list)  # (label, pct, reset_iso)
+    quota_key: str = field(default="", repr=False, compare=False)
+    temporary_error: bool = False
+    checked_at: float = field(default=0.0, repr=False, compare=False)
+
+
+_QUOTA_CACHE_TTL = 7 * 24 * 3600
+
+
+def _quota_key(app: str, identity: str | tuple[str, str]) -> str:
+    return hashlib.sha256(json.dumps((app, identity)).encode("utf-8")).hexdigest()
+
+
+def _codex_quota_key(saved: object) -> str:
+    tokens = saved.get("tokens") if isinstance(saved, dict) else None
+    access = tokens.get("access_token") if isinstance(tokens, dict) else None
+    return _quota_key("codex", engine._codex_identity(saved) or access) if isinstance(access, str) and access else ""
+
+
+def _quota_entry_is_current(entry: object, now: float) -> bool:
+    return (isinstance(entry, dict) and isinstance(entry.get("at"), (int, float))
+            and now - _QUOTA_CACHE_TTL < entry["at"] <= now)
+
+
+def unexpired_snapshot(result: ProfileUsage, now: float) -> ProfileUsage | None:
+    """Keep verified windows that have yet to reset."""
+    age = now - result.checked_at
+    if not 0 <= age < _QUOTA_CACHE_TTL:
+        return None
+    rows = []
+    for row in result.rows:
+        window, _, reset = row
+        seconds = _reset_seconds(reset, now=now)
+        max_age = 5 * 3600 if window == "5h" else _QUOTA_CACHE_TTL
+        unexpired = age < max_age if seconds is None else seconds > 0
+        if unexpired:
+            rows.append(row)
+    return replace(result, rows=rows) if rows else None
+
+
+def load_quotas(app: str, targets: dict[str | None, tuple[str, Path]]) -> dict[str | None, ProfileUsage]:
+    saved = _load_cache().get("_quotas")
+    if not isinstance(saved, dict) or not saved:
+        return {}
+    now = time.time()
+    results = {}
+    for name, (label, path) in targets.items():
+        try:
+            if app == "codex":
+                key = _codex_quota_key(json.loads((path / ".codex" / "auth.json").read_text("utf-8")))
+            else:
+                path = engine.claude_profile_userdata(path)
+                status, session, _ = _read_session(path)
+                if status == "locked":
+                    session = _cache_get_session(str(path.resolve()))
+                key = _quota_key("claude", session) if session else ""
+        except (OSError, ValueError):
+            continue
+        if not key:
+            continue
+        entry = saved.get(key)
+        if not _quota_entry_is_current(entry, now) or not isinstance(entry.get("rows"), list):
+            continue
+        rows = []
+        for row in entry["rows"]:
+            if not isinstance(row, list) or len(row) != 3:
+                continue
+            window, used, reset = row
+            pct = _percent(used)
+            if not isinstance(window, str) or not isinstance(reset, str) or pct is None:
+                continue
+            rows.append((window, pct, reset))
+        restored = ProfileUsage(label, ok=True, rows=rows, quota_key=key, checked_at=entry["at"])
+        if (current := unexpired_snapshot(restored, now)) is not None:
+            results[name] = current
+    return results
+
+
+def _save_quota(result: ProfileUsage, started: float) -> None:
+    if not result.quota_key or result.temporary_error:
+        return
+    try:
+        with engine.file_lock(_CACHE_FILE.with_suffix(".lock")):
+            cache = _load_cache()
+            saved = cache.get("_quotas")
+            now = time.time()
+            quotas = ({key: entry for key, entry in saved.items() if _quota_entry_is_current(entry, now)}
+                      if isinstance(saved, dict) else {})
+            previous = quotas.get(result.quota_key)
+            if previous is not None and previous["at"] > started:
+                return
+            quotas[result.quota_key] = {"at": started, "rows": result.rows if result.ok else []}
+            cache["_quotas"] = quotas
+            _write_cache(cache)
+    except OSError:
+        pass
+
+
+def _usage_request_error(error: Exception) -> str:
+    if isinstance(error, urllib.error.HTTPError):
+        return {
+            401: "session expired or invalid — sign in again",
+            403: "access denied",
+            429: "too many requests — try again later",
+        }.get(error.code, f"usage request failed (HTTP {error.code})")
+    if isinstance(error, (OSError, HTTPException)):
+        return "network unavailable"
+    return "unreadable usage response"
+
+
+def _set_usage_error(result: ProfileUsage, error: Exception) -> None:
+    result.error = _usage_request_error(error)
+    result.temporary_error = not isinstance(error, urllib.error.HTTPError) or error.code not in (401, 403)
+    if isinstance(error, urllib.error.HTTPError) and error.fp is not None:
+        error.close()
 
 
 def _window_label(seconds) -> str:
@@ -377,18 +503,25 @@ def _window_label(seconds) -> str:
 
 def _fetch_claude(name: str, profile_dir: Path) -> ProfileUsage:
     res = ProfileUsage(name=name)
+    profile_dir = engine.claude_profile_userdata(profile_dir)
     cache_key = str(profile_dir.resolve())
+    cookie_file = _cookie_file_id(cache_key)
 
     status, session, cf = _read_session(profile_dir)
     if status == "live":
-        _cache_put_session(cache_key, session)  # keep the cache warm for when it locks
+        if cookie_file is not None:
+            _cache_put_session(cache_key, session, cookie_file)
     else:
         session = _cache_get_session(cache_key) if status == "locked" else None
         cf = None
         if not session:
-            res.error = "app open — close it once" if status == "locked" else "not signed in"
+            res.error = {
+                "locked": "login data locked — close the instance and reload",
+                "unreadable": "login data unreadable",
+            }.get(status, "not signed in")
             return res
 
+    res.quota_key = _quota_key("claude", session)
     cookie_header = f"sessionKey={session}" + (f"; cf_clearance={cf}" if cf else "")
     try:
         orgs = _api_get(_ORGS_URL, cookie_header)
@@ -400,27 +533,28 @@ def _fetch_claude(name: str, profile_dir: Path) -> ProfileUsage:
         org_id = org.get("uuid") or org.get("id")
         data = _api_get(_USAGE_URL.format(org=org_id), cookie_header)
         for label, key in (("5h", "five_hour"), ("7d", "seven_day")):
-            node = data.get(key) or {}
-            pct = _utilization(node)
-            if pct is not None:
-                res.rows.append((label, pct, node.get("resets_at") or ""))
-        for lim in data.get("limits") or []:  # per-model weekly (Fable, Opus…)
-            if lim.get("kind") != "weekly_scoped":
+            node = data.get(key)
+            if not isinstance(node, dict):
                 continue
-            model = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
-            pct = lim.get("percent")
-            if model and pct is not None:
-                res.rows.append((model, float(pct), lim.get("resets_at") or ""))
+            pct = _percent(node.get("utilization"))
+            if pct is not None:
+                reset = node.get("resets_at")
+                res.rows.append((label, pct, reset if isinstance(reset, str) else ""))
+        for lim in data.get("limits") or []:  # per-model weekly (Fable, Opus…)
+            if not isinstance(lim, dict) or lim.get("kind") != "weekly_scoped":
+                continue
+            scope = lim.get("scope")
+            model = scope.get("model") if isinstance(scope, dict) else None
+            label = model.get("display_name") if isinstance(model, dict) else None
+            pct = _percent(lim.get("percent"))
+            if isinstance(label, str) and label and pct is not None:
+                reset = lim.get("resets_at")
+                res.rows.append((label, pct, reset if isinstance(reset, str) else ""))
         res.ok = True
-    except urllib.error.HTTPError as exc:
-        res.error = {401: "session expired", 403: "blocked (Cloudflare)",
-                     429: "rate-limited"}.get(exc.code, f"HTTP {exc.code}")
-        if exc.code == 401:
+    except (HTTPException, OSError, ValueError, KeyError) as exc:
+        _set_usage_error(res, exc)
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 401:
             _cache_drop(cache_key)  # token rotated — drop it so the next read re-captures
-    except urllib.error.URLError:
-        res.error = "network unavailable"
-    except (OSError, ValueError, KeyError) as exc:
-        res.error = exc.__class__.__name__
     return res
 
 
@@ -435,11 +569,11 @@ _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
 
 def _codex_get(url: str, access_token: str, account_id: str, timeout: float = 20.0):
     req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {access_token}",
         "User-Agent": _UA,
         "Accept": "*/*",
-        "chatgpt-account-id": account_id or "",
     })
+    req.add_unredirected_header("Authorization", f"Bearer {access_token}")
+    req.add_unredirected_header("Chatgpt-account-id", account_id or "")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", "replace"))
 
@@ -454,36 +588,47 @@ def _epoch_to_iso(ts) -> str:
 def _fetch_codex(name: str, profile_dir: Path) -> ProfileUsage:
     res = ProfileUsage(name=name)
     auth = profile_dir / ".codex" / "auth.json"
-    if not auth.is_file():
+    try:
+        saved = json.loads(auth.read_text("utf-8"))
+    except FileNotFoundError:
         res.error = "not signed in"
         return res
-    try:
-        tokens = (json.loads(auth.read_text("utf-8")) or {}).get("tokens") or {}
     except (OSError, ValueError):
-        res.error = "not signed in"
+        res.error = "login data unreadable"
+        return res
+    tokens = saved.get("tokens", {}) if isinstance(saved, dict) else None
+    if not isinstance(tokens, dict):
+        res.error = "login data unreadable"
         return res
     access, account_id = tokens.get("access_token"), tokens.get("account_id")
     if not access:
         res.error = "not signed in"
         return res
+    res.quota_key = _codex_quota_key(saved)
     try:
         data = _codex_get(_CODEX_USAGE_URL, access, account_id)
-        res.account = data.get("email") or "—"
+        email = data.get("email")
+        res.account = email if isinstance(email, str) and email else "—"
         rl = data.get("rate_limit") or {}
         for win in (rl.get("primary_window"), rl.get("secondary_window")):
-            if not win or win.get("used_percent") is None:
+            if not isinstance(win, dict):
                 continue
-            label = _window_label(win.get("limit_window_seconds"))
-            res.rows.append((label, win["used_percent"], _epoch_to_iso(win.get("reset_at"))))
+            pct = _percent(win.get("used_percent"))
+            if pct is not None:
+                label = _window_label(win.get("limit_window_seconds"))
+                res.rows.append((label, pct, _epoch_to_iso(win.get("reset_at"))))
         res.ok = True
-    except urllib.error.HTTPError as exc:
-        res.error = {401: "expired — open Codex once", 403: "forbidden",
-                     429: "rate-limited"}.get(exc.code, f"HTTP {exc.code}")
-    except urllib.error.URLError:
-        res.error = "network unavailable"
-    except (OSError, ValueError, KeyError) as exc:
-        res.error = exc.__class__.__name__
+    except (HTTPException, OSError, ValueError, KeyError) as exc:
+        _set_usage_error(res, exc)
     return res
+
+
+def claude_oauth_saved(config: Path) -> bool:
+    try:
+        cfg = json.loads(config.read_text("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(cfg, dict) and bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
 
 
 def session_snapshot(profile_dir: Path) -> dict:
@@ -497,34 +642,58 @@ def session_snapshot(profile_dir: Path) -> dict:
         has_sk = bool(_read_claude_cookies(profile_dir).get("sessionKey"))
     except (sqlite3.Error, OSError, ValueError, KeyError, TypeError):
         pass
-    has_oauth = False
-    try:
-        cfg = json.loads((profile_dir / "config.json").read_text("utf-8"))
-        has_oauth = isinstance(cfg, dict) and bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
-    except (OSError, ValueError):
-        pass
-    return {"sessionKey": has_sk, "oauth": has_oauth}
+    return {"sessionKey": has_sk, "oauth": claude_oauth_saved(profile_dir / "config.json")}
 
 
-def fetch_all(targets: list[tuple[str, Path]], app: str = "claude") -> list[ProfileUsage]:
-    """Fetch usage for every ``(display_name, dir)`` target in parallel
-    (network-bound), order preserved. ``app`` selects the backend: ``"claude"``
-    (cookie + claude.ai) or ``"codex"`` (ChatGPT OAuth token + codex/usage). The
-    explicit name lets the main instance show up under a friendly label."""
+def fetch_as_ready(targets: list[tuple[str, Path]], app: str) -> Iterator[tuple[int, ProfileUsage]]:
+    """Fetch accounts in parallel and yield each result with its target index."""
     if not targets:
-        return []
+        return
     fetch = _fetch_codex if app == "codex" else _fetch_claude
 
     def fetch_target(target: tuple[str, Path]) -> ProfileUsage:
+        started = time.time()
         try:
-            return fetch(*target)
-        except (OSError, sqlite3.Error, ValueError, KeyError, TypeError,
+            result = fetch(*target)
+        except (HTTPException, OSError, sqlite3.Error, ValueError, KeyError, TypeError,
                 AttributeError, IndexError, OverflowError):
             return ProfileUsage(name=target[0], error="unreadable account data")
+        if result.ok:
+            result.checked_at = started
+        _save_quota(result, started)
+        return result
 
-    workers = min(8, len(targets))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(fetch_target, targets))
+    pending = SimpleQueue()
+    completed = SimpleQueue()
+    for job in enumerate(targets):
+        pending.put(job)
+
+    def worker() -> None:
+        while True:
+            try:
+                index, target = pending.get_nowait()
+            except Empty:
+                return
+            try:
+                result = fetch_target(target)
+            except BaseException as error:
+                completed.put((index, error))
+                return
+            completed.put((index, result))
+
+    # Network requests in the background must not hold the manager open.
+    for _ in range(min(8, len(targets))):
+        Thread(target=worker, daemon=True).start()
+    for _ in targets:
+        index, result = completed.get()
+        if isinstance(result, BaseException):
+            raise result
+        yield index, result
+
+
+def fetch_all(targets: list[tuple[str, Path]], app: str = "claude") -> list[ProfileUsage]:
+    """Fetch usage for each (display name, directory) in target order."""
+    return [result for _, result in sorted(fetch_as_ready(targets, app))]
 
 
 # --- Formatting helpers (consumed by the UI layer) ------------------------- #
@@ -532,21 +701,26 @@ def format_pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.0f}%"
 
 
-def humanize_reset(iso: str) -> str:
+def _reset_seconds(iso: str, *, now: float | None = None) -> float | None:
     if not iso:
-        return "—"
+        return None
     try:
         when = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
+        return None
+    current = datetime.now(when.tzinfo) if now is None else datetime.fromtimestamp(now, when.tzinfo)
+    return (when - current).total_seconds()
+
+
+def humanize_reset(iso: str) -> str:
+    seconds = _reset_seconds(iso)
+    if seconds is None:
         return "—"
-    now = datetime.now(when.tzinfo) if when.tzinfo else datetime.now()
-    seconds = int((when - now).total_seconds())
     if seconds <= 0:
         return "now"
-    days, rem = divmod(seconds, 86_400)
-    hours = rem // 3_600
-    if days:
-        return f"in {days}d {hours}h"
-    if hours:
-        return f"in {hours}h"
-    return "in <1h"
+    if seconds < 60:
+        return f"in {max(1, int(seconds))}s"
+    hours, minutes = divmod(int(seconds) // 60, 60)
+    days, hours = divmod(hours, 24)
+    units = [f"{value}{unit}" for value, unit in ((days, "d"), (hours, "h"), (minutes, "m")) if value]
+    return "in " + " ".join(units)

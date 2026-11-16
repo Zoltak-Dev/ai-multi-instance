@@ -22,41 +22,42 @@ def _error(message: str, title: str = "Multi-Instance") -> None:
         pass
 
 
-def _parse_args(argv: list[str]) -> tuple[engine.App | None, list[str]]:
-    """Pop --app=<key> from argv. Returns (app, rest)."""
-    app: engine.App | None = None
-    rest: list[str] = []
-    for a in argv:
-        if not a.strip():
-            continue
-        if a.startswith("--app="):
-            app = engine.APPS.get(a.split("=", 1)[1].strip().lower())
-        else:
-            rest.append(a)
-    return app, rest
+def _confirm_codex_restart(name: str) -> bool:
+    from ctypes import windll
+
+    ok_cancel, warning, default_cancel, foreground = 0x01, 0x30, 0x100, 0x10000
+    answer = windll.user32.MessageBoxW(
+        None,
+        f"Switch to '{name}'? This will close and reopen the main Codex window.",
+        "Codex Multi-Instance",
+        ok_cancel | warning | default_cancel | foreground,
+    )
+    return answer == 1  # IDOK
+
+
+def _parse_args(argv: list[str]) -> tuple[engine.App, str]:
+    app = engine.CLAUDE
+    if argv and argv[0].startswith("--app="):
+        key = argv[0].split("=", 1)[1].strip().lower()
+        if key not in engine.APPS:
+            raise ValueError("Choose either --app=claude or --app=codex.")
+        app, argv = engine.APPS[key], argv[1:]
+    if len(argv) != 1 or not argv[0].strip():
+        raise ValueError("Usage: launcher.pyw --app=<claude|codex> <profile-name>")
+    return app, argv[0]
 
 
 def main() -> int:
-    app, args = _parse_args(sys.argv[1:])
-    if app is None:
-        app = engine.CLAUDE  # last-resort default
-
-    engine.set_app(app, persist=False)
-
-    exe = engine.find_app_exe()
-    if exe is None:
-        _error(f"{app.display} not found.\nIs the desktop app installed?",
-               f"{app.display} Multi-Instance")
-        return 1
-
-    name = args[0] if args else ""
-    if not name:
-        _error("Usage: launcher.pyw --app=<claude|codex> <profile-name>",
-               f"{app.display} Multi-Instance")
+    try:
+        app, name = _parse_args(sys.argv[1:])
+    except ValueError as e:
+        _error(str(e))
         return 2
 
     try:
-        engine.launch_profile(name, exe=exe)
+        engine.initialize_runtime()
+        engine.set_app(app, persist=False)
+        engine.launch_account(name, confirm_restart=lambda _: _confirm_codex_restart(name))
     except (OSError, RuntimeError, ValueError) as e:
         _error(str(e), f"{app.display} Multi-Instance")
         return 1

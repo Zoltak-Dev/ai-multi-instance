@@ -1,4 +1,4 @@
-name: Windows checks
+name: Windows checks and releases
 
 on:
   push:
@@ -14,26 +14,245 @@ jobs:
       matrix:
         python: ['3.9', '3.14']
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -v
-      - name: Install build tool
-        if: matrix.python == '3.14'
-        run: python -m pip install pyinstaller==6.20.0
-      - name: Build console manager
-        if: matrix.python == '3.14'
-        run: python -m PyInstaller --onefile --console --name ai-multi-instance --clean --noconfirm main.py
-      - name: Build shortcut launcher
-        if: matrix.python == '3.14'
-        run: python -m PyInstaller --onefile --noconsole --name launcher --clean --noconfirm launcher.pyw
-      - uses: actions/upload-artifact@v7
-        if: matrix.python == '3.14'
+  version:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'Zoltak-Dev/ai-multi-instance'
+    runs-on: ubuntu-latest
+    outputs:
+      number: ${{ steps.detect.outputs.number }}
+      title: ${{ steps.detect.outputs.title }}
+      notes: ${{ steps.detect.outputs.notes }}
+      source_only: ${{ steps.detect.outputs.source_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          name: ai-multi-instance-windows
-          path: |
-            dist/ai-multi-instance.exe
-            dist/launcher.exe
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the new version and release notes
+        id: detect
+        shell: python
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          def version(source):
+              match = re.search(r'^MANAGER_VERSION\s*=\s*["\']([^"\']+)["\']', source, re.M)
+              if match is None:
+                  return None
+              number = match[1]
+              part = r'(?:0|[1-9][0-9]{0,4})'
+              if not re.fullmatch(fr'{part}\.{part}\.{part}', number):
+                  raise SystemExit(f'Invalid MANAGER_VERSION: {number}')
+              parts = tuple(map(int, number.split('.')))
+              if max(parts) > 65535:
+                  raise SystemExit('Version components must fit in a Windows version resource.')
+              return parts
+
+          current = version(Path('engine.py').read_text(encoding='utf-8'))
+          if current is None:
+              raise SystemExit('MANAGER_VERSION is missing from engine.py.')
+          before = os.environ['BEFORE']
+          if before == '0' * 40:
+              raise SystemExit('No previous main commit to compare.')
+          source = subprocess.check_output(['git', 'show', f'{before}:engine.py'], encoding='utf-8')
+          # The source of the last manually published release has no version constant.
+          previous = version(source) or (2, 0, 1)
+          if current < previous:
+              raise SystemExit('MANAGER_VERSION decreased. Use a higher version for a release.')
+          if current > previous:
+              number = '.'.join(map(str, current))
+              tag = f'v{number}'
+              changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
+              release_sections = []
+              for section in re.split(r'^##[ \t]+', changelog, flags=re.M)[1:]:
+                  heading, _, body = section.partition('\n')
+                  title = heading.strip()
+                  if title == tag or title.startswith(f'{tag} — '):
+                      release_sections.append((title, body.strip()))
+              if len(release_sections) != 1:
+                  raise SystemExit(f'Add one non-empty "## {tag} — Short title" section to CHANGELOG.md.')
+              title, notes = release_sections[0]
+              first_line, _, rest = notes.partition('\n')
+              source_only = first_line == '<!-- source-only -->'
+              if source_only:
+                  notes = rest.strip()
+              if not notes:
+                  raise SystemExit(f'Add release notes under "## {title}" in CHANGELOG.md.')
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                  print(f'number={number}', file=output)
+                  print(f'title={title}', file=output)
+                  print(f'notes={json.dumps(notes, ensure_ascii=False)}', file=output)
+                  print(f'source_only={str(source_only).lower()}', file=output)
+          else:
+              print('Version unchanged.')
+
+  sign:
+    if: needs.version.outputs.number != '' && needs.version.outputs.source_only != 'true'
+    needs: [test, version]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.number }}
+      ZIP_NAME: ai-multi-instance-v${{ needs.version.outputs.number }}-windows.zip
+    outputs:
+      artifact: ${{ steps.signed.outputs.artifact-id }}
+    steps:
+      - name: Check SignPath configuration
+        shell: pwsh
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+        run: |
+          if (-not $env:SIGNPATH_API_TOKEN -or -not $env:SIGNPATH_ORGANIZATION_ID) {
+            throw 'Set SIGNPATH_API_TOKEN and SIGNPATH_ORGANIZATION_ID before pushing a version bump.'
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.14'
+      - run: python -m pip install pyinstaller==6.22.3
+      - run: python tools/build_windows.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: unsigned
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: dist/${{ env.ZIP_NAME }}
+          archive: false
+          overwrite: true
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
+      - name: Sign both executables with SignPath
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ai-multi-instance
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: windows-zip
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          skip-decompress: true
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ runner.temp }}/signed
+          parameters: |
+            version: ${{ toJSON(needs.version.outputs.number) }}
+      - name: Verify the signed ZIP
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "signed/$env:ZIP_NAME"
+          $executables = 'ai-multi-instance.exe', 'launcher.exe'
+          $expected = $executables + @('LICENSE', 'README.md', 'CHANGELOG.md')
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            if (Compare-Object $expected @($archive.Entries.FullName) -CaseSensitive) {
+              throw 'The signed ZIP has unexpected contents.'
+            }
+          } finally { $archive.Dispose() }
+          $folder = Join-Path $env:RUNNER_TEMP 'verify-signatures'
+          Expand-Archive -LiteralPath $zip -DestinationPath $folder
+          foreach ($name in $executables) {
+            $file = Get-Item -LiteralPath (Join-Path $folder $name)
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid' -or -not $signature.TimeStamperCertificate) {
+              throw "Invalid or missing timestamped signature for $name ($($signature.Status))."
+            }
+            $publisher = $signature.SignerCertificate.GetNameInfo('SimpleName', $false)
+            if ($publisher -cne 'SignPath Foundation' -or $file.VersionInfo.ProductVersion -cne $env:VERSION) {
+              throw "Unexpected publisher or version for $name."
+            }
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: signed
+        with:
+          name: signed-windows-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed/${{ env.ZIP_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [test, version, sign]
+    if: >-
+      ${{ !cancelled() && needs.test.result == 'success' && needs.version.result == 'success' &&
+      needs.version.outputs.number != '' &&
+      (needs.sign.result == 'success' || (needs.version.outputs.source_only == 'true' && needs.sign.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: windows-release-${{ needs.version.outputs.number }}
+      cancel-in-progress: false
+    env:
+      TAG: v${{ needs.version.outputs.number }}
+      ZIP_NAME: ai-multi-instance-v${{ needs.version.outputs.number }}-windows.zip
+      SOURCE_ONLY: ${{ needs.version.outputs.source_only }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: needs.sign.result == 'success'
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact }}
+          path: signed
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TITLE: ${{ needs.version.outputs.title }}
+          RELEASE_NOTES_JSON: ${{ needs.version.outputs.notes }}
+        run: |
+          set -euo pipefail
+          zip="signed/$ZIP_NAME"
+          if [[ "$SOURCE_ONLY" != true ]]; then test -s "$zip"; fi
+          marker="<!-- windows-release:$GITHUB_SHA -->"
+          tag_sha=$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+            "refs/tags/$TAG" "refs/tags/$TAG^{}" | sort -k2 | tail -n 1 | cut -f1)
+          if [[ -n "$tag_sha" && "$tag_sha" != "$GITHUB_SHA" ]]; then
+            echo "Tag $TAG already belongs to another commit." >&2
+            exit 1
+          fi
+          if release=$(gh release view "$TAG" --json body,isDraft,targetCommitish,assets 2>/dev/null); then
+            if ! jq -e --arg marker "$marker" '.body | startswith($marker)' <<< "$release" >/dev/null; then
+              echo "Release $TAG was not created by this workflow for this commit." >&2
+              exit 1
+            fi
+            if jq -e '.isDraft == false' <<< "$release" >/dev/null; then
+              test "$tag_sha" = "$GITHUB_SHA"
+              if [[ "$SOURCE_ONLY" != true ]]; then
+                jq -e --arg zip "$ZIP_NAME" '.assets | any(.name == $zip and .size > 0)' <<< "$release" >/dev/null
+              fi
+              exit 0
+            fi
+            if [[ -z "$tag_sha" ]] && ! jq -e --arg sha "$GITHUB_SHA" '.targetCommitish == $sha' <<< "$release" >/dev/null; then
+              echo "Release draft $TAG targets another commit." >&2
+              exit 1
+            fi
+          else
+            source_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA"
+            description=$(jq -er 'strings | select(length > 0)' <<< "$RELEASE_NOTES_JSON")
+            downloads="Download **Source code (zip)** under **Assets** and follow the [source installation instructions]($source_url/README.md#install)."
+            if [[ "$SOURCE_ONLY" != true ]]; then
+              downloads="Download the signed Windows ZIP under **Assets** or follow the [source installation instructions]($source_url/README.md#install)."
+            fi
+            printf -v notes '%s\n\n%s\n\n%s\n\n%s' "$marker" "$description" "$downloads" \
+              "[Code signing policy]($source_url/.github/signpath/CODE_SIGNING.md)"
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$RELEASE_TITLE" \
+              --notes "$notes"
+          fi
+          if [[ "$SOURCE_ONLY" != true ]]; then gh release upload "$TAG" "$zip" --clobber; fi
+          gh release edit "$TAG" --draft=false

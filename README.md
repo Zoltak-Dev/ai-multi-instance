@@ -1,21 +1,28 @@
-# Claude / Codex Multi-Instance
+<h1 align="center">AI Multi-Instance</h1>
 
-[![Download](https://img.shields.io/badge/Download-Windows%20ZIP-28A745?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/Zoltak-Dev/ai-multi-instance/releases/latest/download/ai-multi-instance-v2.0.1-windows.zip)
-[![Support on Ko-fi](https://img.shields.io/badge/Support%20me-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/zoltrak)
+<p align="center">
+  Manage multiple Claude and Codex desktop accounts on Windows.<br>
+  Open separate profiles, or switch Codex accounts while keeping your local chats.
+</p>
 
-Run multiple accounts of the [Claude desktop app](https://claude.ai/download) **and** the [Codex desktop app](https://chatgpt.com/codex) on Windows. The official clients only support one account at a time. This tool launches each app with a dedicated profile directory per account, allowing several accounts to run side by side and be switched instantly.
+<p align="center">
+  <a href="https://github.com/Zoltak-Dev/ai-multi-instance/archive/refs/heads/main.zip"><img alt="Download source ZIP" src="https://img.shields.io/badge/Download-Source%20ZIP-2EA44F?style=for-the-badge&amp;logo=github&amp;logoColor=white"></a>
+  <a href="https://github.com/Zoltak-Dev/ai-multi-instance/releases"><img alt="Total release downloads" src="https://img.shields.io/github/downloads/Zoltak-Dev/ai-multi-instance/total?style=for-the-badge&amp;label=Release%20downloads&amp;color=3B82F6"></a>
+  <a href="https://ko-fi.com/zoltrak"><img alt="Support me on Ko-fi" src="https://img.shields.io/badge/Support%20me-Ko--fi-FF5E5B?style=for-the-badge&amp;logo=kofi&amp;logoColor=white"></a>
+</p>
 
-![Claude / Codex Multi-Instance preview](https://github.com/user-attachments/assets/3c8f5415-9795-490f-a177-153f42b21f44)
-
-The interface is arrow-key driven: move the highlight with `↑`/`↓`, then press a digit for an action (`1` launch, `2` sign-in, `3` close, `4` rename, `5` shortcut, `6` delete, `7` new, `8` switch app, `9` usage, `0` quit). Because rows are picked with the arrows and never by number, a digit is always an action — no ambiguity. Press `Space` to tick several profiles and act on them at once. The list's first row is always the **main instance** (your normal Claude, launched without a profile) so you can launch or close it from here too; the running/idle state refreshes on its own. The accent colour follows the app — Claude's orange, Codex's blue.
+<p align="center">
+  <a href="docs/demo.mp4"><img src="docs/demo-preview.webp" alt="Preview of AI Multi-Instance. Click to watch the full demo." width="800"></a><br>
+  <a href="docs/demo.mp4">▶ Watch the 1-minute demo</a>
+</p>
 
 ## Install
 
-Windows 10+ and the Claude and/or Codex desktop app installed.
+**Windows 10 or 11** with at least one supported desktop app installed as a Windows app package. [Claude Desktop](https://claude.ai/download) · [ChatGPT desktop app with Codex](https://chatgpt.com/download/)
 
-**Compatibility checked on 30 October 2026:** Claude Desktop `3.1623.1.0`, Codex `26.1027.3384.0`, Windows 11 build `26200`. Two temporary profiles of each app were launched side by side. Snapshot adoption, cancellation and recovery are covered by automated tests using temporary directories; a complete browser sign-in still needs to be checked with your account.
+**From source — recommended**
 
-**From source (recommended)** — requires Python 3.9+:
+Install Python 3.9+ and Git, then run these commands in a terminal. No extra Python packages are needed. [Python](https://www.python.org/downloads/windows/) · [Git](https://git-scm.com/install/windows)
 
 ```powershell
 git clone https://github.com/Zoltak-Dev/ai-multi-instance.git
@@ -23,115 +30,109 @@ cd ai-multi-instance
 python main.py
 ```
 
-No `pip install` — the project uses only the Python standard library.
+You can also extract the source ZIP and run `python main.py` from its folder. Git is needed for automatic updates of a cloned installation.
 
-**Pre-built binary (no Python required)** — download `ai-multi-instance-vX.Y.Z-windows.zip` from [Releases](https://github.com/Zoltak-Dev/ai-multi-instance/releases), unzip both `.exe` files in the same folder, and run `ai-multi-instance.exe`.
+## Use
 
-The binaries are unsigned. Windows may show a SmartScreen warning, and [Smart App Control](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview) may block unknown unsigned apps. If Windows blocks the download, use the source install above.
+1. Run `python main.py`. Use `C` to switch between Claude and Codex.
+2. Press `7` and name your profile. Follow the sign-in prompt or press `2` later. The tool also tries to create a desktop shortcut for the profile.
+3. Select it with `↑` / `↓`, then press **`Enter` or `1`** to open it.
 
-**Updating:** replace the two executables together, or run `git pull --ff-only` for a source install. Keep your `ClaudeProfiles`, `CodexProfiles`, `state.json` and `usage_cache.json` files. Do not run two copies of the manager's sign-in flow at once.
+**Main instance** is your regular Claude or Codex window. The rows below it are your saved profiles. A filled dot `●` marks a running instance. Use `Space` to select several profiles for actions such as closing them or managing their shortcuts.
 
-## Usage
+### Sign in to a profile
 
-Move the highlight with `↑`/`↓` and press a digit for the action — rows are never typed by number. `Space` ticks a profile so an action (launch, close, shortcut, delete) can run on several at once. The top row, **main instance**, is your normal single-account Claude; only launch/close apply to it.
+Highlight a named profile and press `2` to sign in or change its account.
 
-Creating a profile (`7`) also creates a desktop shortcut and offers to sign the profile in right away (see below). Double-click the shortcut to launch that profile directly without opening the menu.
+- **Claude.** The tool closes your main Claude window, sets its data aside, and opens a blank Claude for sign-in. When the new session is ready, the tool saves it to your profile and restores your main data. Press `Q` or `Esc` in the manager to cancel. If the manager closes during sign-in, reopen it and choose `R` when it offers to restore the main session.
+- **Codex.** Pick your ChatGPT account in the browser. The tool uses the CLI bundled with Codex Desktop and saves the login to the selected profile once sign-in succeeds. Your main Codex session and chats stay in place. Press `Q` or `Esc` in the manager to cancel.
 
-Profiles live in their own folders, kept fully separate per app:
+When you sign in to an existing profile, a successful Claude sign-in replaces that profile's saved app data. A successful Codex sign-in replaces its saved login.
 
-- `ClaudeProfiles/<name>/` for Claude
-- `CodexProfiles/<name>/` for Codex
+### Choose how Codex opens profiles
 
-Deleting the folder is the same as deleting the profile.
+Use `H` to switch modes.
 
-## How multi-instance works
+| Mode | What happens when you open a profile |
+| --- | --- |
+| **Shared history** (default) | The account opens in Main instance and uses its local chat history. Recommended if you switch accounts to keep working on the same chats. |
+| **Isolated profiles** | The account opens in its own window with separate app data and local history. You can keep several accounts open side by side. |
 
-Claude and Codex use different mechanisms to enforce their single-instance behavior.
+In Shared history, the loaded profile appears next to **Main instance**. If a switch would close the current window, the tool asks you to press `Enter` or `1` again. With Main instance closed, use `D` to attach or detach a saved account. Changing to Isolated profiles detaches the loaded profile and keeps it available in the list. When you first replace a main account that has no saved profile, the tool saves it as **Original main account**.
 
-Claude profiles use Chromium's `--user-data-dir` plus a per-profile `LOCALAPPDATA` under `<profile>/.localappdata`. Some Claude versions redirect their data to `%LOCALAPPDATA%/Claude-Data/<family>` before checking the single-instance lock; isolating both locations prevents them from opening the main account instead. Child tools inherit that `LOCALAPPDATA`, so their local caches are also separate.
+Claude always opens named profiles in separate windows. The tool launches the installed clients with a separate data directory for each isolated profile. Those directories live next to the tool under `ClaudeProfiles/` and `CodexProfiles/` and include saved sign-ins.
 
-Codex profiles use `--user-data-dir` and `CODEX_ELECTRON_USER_DATA_PATH` for desktop data, plus `CODEX_HOME` for authentication. `CODEX_CLI_PATH` points to the installed app's bundled CLI when present, avoiding package-identity errors after updates. The launcher rediscovers the executable when an app update removes its old installation path.
+### Check usage
 
-## Signing in to a profile
+The menu shows the last known **remaining** quota for the `5h` and `7d` windows when available, then refreshes it in the background. A green `✓` means the last usage check succeeded. A grey `✓` means the tool couldn't verify the account.
 
-Windows normally delivers the `claude://` sign-in callback to the default Claude instance. The tool uses a temporary snapshot of that instance so the browser callback can complete normally, then moves the signed-in state into your chosen profile.
+Press `8` to fetch current quotas for the selected app. Each account shows its own reset times and the limits reported by its plan. Claude may also report limits per model. A Codex profile loaded in Main instance appears there once.
 
-(A subtlety: the default instance's data has lived in three different places across versions, so this tool **probes** for it rather than assuming an address — see [Known limitations](#known-limitations). Recent Claude versions keep it in `%LOCALAPPDATA%\Claude-Data\<family>`; older Claude versions kept it inside the MSIX container at `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude`; an unpackaged install uses the plain `%APPDATA%\Claude`. Whichever one actually holds a profile is what gets moved around below.)
-
-The tool works around this with a snapshot flow (press `2`, Claude only — also offered right after creating a profile):
-
-1. Your main Claude data is stashed aside, and a fresh default Claude opens.
-2. Sign in there with the account you want. Email and Google both work, since this is the real default app receiving the callback.
-3. That's it — **no key to press**. The tool detects the sign-in on its own, captures the session, and puts your main data back. Press `q` at any point to cancel and restore.
-
-How the detection works: the app is "logged in" when a `sessionKey` cookie is present (the OAuth token in `config.json` is derived from it). The cookie store is locked while the app runs, so the tool can't read it live — instead it watches the cookie database and its SQLite journal/WAL alongside `config.json` (a plain file, readable live). A cookie write immediately before or after OAuth is accepted, while unrelated writes from app startup are ignored. If you close the tool mid sign-in, it detects the interrupted state on next launch and offers to restore or drop the set-aside session.
-
-Windows DPAPI encryption is scoped to the Windows user, not to the folder, so the moved session stays valid. Nothing is patched or hijacked.
-
-## Usage tracker
-
-Press `9` (works for both Claude and Codex). Each account — the main instance included — gets a block listing every limit it has, with its **own** reset time:
-
-```
-  ◆ Usage   Claude · 2 accounts
-
-  Main instance   you@example.com
-     5h      78%   resets in 2h
-     7d      13%   resets in 6d 17h
-     Fable    5%   resets in 6d 17h
-
-  profilename2   other@example.com
-     5h       0%
-     7d       0%
+```text
+Main instance · Work
+5h         72% left   resets in 43m
+7d         38% left   resets in 2d 6h
 ```
 
-The rows adapt to the account: whatever rolling windows it exposes (`5h`, `7d`, or a Free plan's `30d`) followed by any per-model weekly breakdowns (Claude's `Fable`, etc.). Nothing placeholder is shown — a row appears only if the account actually reports it.
+Press `R` inside Usage to fetch again. If a request fails, the screen shows the reason. The tool uses the accounts already signed in to Claude or Codex to check their quotas.
 
-- **Claude** reads each profile's claude.ai session straight from its own cookie store and queries the official `claude.ai/api/.../usage` endpoint (DPAPI + AES-GCM via Windows CNG through `ctypes`). A running instance holds an exclusive lock on its cookie store, so the session token is cached (DPAPI-encrypted, in `usage_cache.json`) whenever readable and reused while locked — launch a profile once and its usage stays visible whether the app is open or closed.
-- **Codex** reads each profile's ChatGPT token from `<profile>/.codex/auth.json` and queries the `codex/usage` endpoint — no quota spent.
+### Keyboard controls
 
-Both are per account, need no extra logins, and use only the Python standard library.
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` | Choose a profile |
+| `Enter` / `1` | Launch or switch to it |
+| `2` | Sign in |
+| `3` | Close the selected instance |
+| `4` | Rename a profile |
+| `5` | Create or delete a desktop shortcut |
+| `6` | Delete a profile |
+| `7` | Create a profile |
+| `8` | Fetch current usage and reset times |
+| `9` | Donate |
+| `0` | Quit the manager |
+| `C` | Switch between Claude and Codex |
+| `Space` | Select several profiles |
+| `T` | Sort by name or remaining quota in the menu or Usage. The choice is saved. |
+| `R` | Refresh the selected account, or all accounts in Usage |
+| `H` / `D` | Change Codex mode / attach or detach a profile in Shared history |
 
-## Known limitations
+## Tips
 
-**Use v2.0.1 or newer with recent Claude versions.** Earlier releases can mistake a relocated profile's empty old directory for its real data. Current code checks for profile contents, ignores `.user-data-left` markers, and stops sign-in if the real data cannot be found. Run `python diagnose_login.py --duration 0` to inspect the paths without changing anything.
+- **Desktop shortcuts.** On Main instance, `5` creates or deletes a shortcut to this menu. On a profile, it creates or deletes a shortcut that opens that profile directly.
+- **Use another browser profile if sign-in gets stuck.** If ChatGPT stops letting you add accounts in one Chrome profile, open the sign-in link in another profile or create one. [Chrome profiles](https://support.google.com/chrome/answer/2364824?hl=en)
 
-**Cowork virtual machines:** chat and account isolation are supported, but Cowork's machine-wide VM service can resolve bundle paths outside a named profile. Concurrent VMs and a fix for that service are not verified; see [issue #5](https://github.com/Zoltak-Dev/ai-multi-instance/issues/5). This release does not claim to fix Cowork VM startup.
+## Updates
 
-**The sign-in snapshot moves your real profile directory.** It is a rename, not a copy, and it is the mechanism the tool is built on. A stash is never deleted until it has been renamed back into place, and an interrupted run leaves it on disk for recovery — but close the app before running it, and do not interrupt it mid-flow.
+The tool checks GitHub at startup and offers a source update when the program files have changed. Edits to the README, changelog or tests do not trigger a notice. If you cloned the official repo and have a clean working tree on `main`, choose **Update** when offered, then reopen the tool. You can also close the manager and run `git pull --ff-only` in its folder.
 
-**Profiles are isolation, not a sandbox.** Windows DPAPI is scoped to the Windows user rather than to the folder, so any profile's stored secrets stay readable by anything running as you. Separate accounts, same trust boundary.
+For a source ZIP installation, download the new source ZIP and replace the program files in the same folder. **Keep `ClaudeProfiles/`, `CodexProfiles/` and `data/`** to preserve your sign-ins, profiles and settings. Desktop shortcuts point to the folder where you created them.
 
-**Codex signs in inside each profile.** Launch the profile and follow its normal sign-in screen; the snapshot action is only needed for Claude.
+## Troubleshooting
 
-**Only one instance owns the `claude://` protocol at a time.** That is a Windows constraint rather than a tool one, and it is why sign-in needs the snapshot dance at all.
+- **The manager can't find Claude or Codex.** Open the desktop app from the Windows Start menu, then restart AI Multi-Instance. If the app is missing from Start, use the official download links above.
+- **Usage shows an error.** Press `R` in Usage to retry. If the account is signed out, go back to the menu and press `2` on the profile. For Main instance, sign in directly in Claude or Codex.
+- **Claude sign-in gets stuck.** Press `Q` or `Esc` in the manager to cancel. Then select the profile and press `2` to try again.
+- **Cowork won't open in a separate Claude profile.** Try opening Cowork in Main instance. [Cowork issue](https://github.com/Zoltak-Dev/ai-multi-instance/issues/5)
 
-## Checks
+<details>
+<summary>Diagnostics and tests</summary>
+
+Run this from the project folder to see which Claude data folders the manager detects.
+
+```powershell
+python -m tools.diagnose_login --duration 0
+```
+
+Run the automated tests from the same folder. They simulate app launches and use temporary profiles.
 
 ```powershell
 python -m unittest discover -v
-python diagnose_login.py --duration 0
 ```
 
-The tests use temporary data and mocked process launches; they do not close or move your real sessions. GitHub Actions runs them on Windows with Python 3.9 and 3.14 and builds both executables.
-
-## Build
-
-Standalone `.exe` build via PyInstaller, for shipping to users who don't have Python:
-
-```powershell
-python -m pip install pyinstaller==6.20.0
-python -m PyInstaller --onefile --console --name ai-multi-instance --clean --noconfirm main.py
-python -m PyInstaller --onefile --noconsole --name launcher --clean --noconfirm launcher.pyw
-```
-
-The two binaries land in `dist/`. Ship them in the same folder — `ai-multi-instance.exe` looks for `launcher.exe` next to itself to manage desktop shortcuts for both Claude and Codex.
-
-Pre-built binaries are attached to each [release](https://github.com/Zoltak-Dev/ai-multi-instance/releases).
+</details>
 
 ## Star History
-
-If this tool saved you some headache, a ⭐ on the repo is appreciated — it's the only feedback signal I get and it really helps the project gain visibility. If you'd like to support its continued development, you can also [buy me a coffee on Ko-fi](https://ko-fi.com/zoltrak). Every donation helps me keep improving and maintaining the project. ❤️
 
 <a href="https://www.star-history.com/?repos=Zoltak-Dev%2Fai-multi-instance&type=date&legend=top-left">
  <picture>
@@ -141,6 +142,4 @@ If this tool saved you some headache, a ⭐ on the repo is appreciated — it's 
  </picture>
 </a>
 
-## License
-
-MIT
+[Changelog](CHANGELOG.md) · [Code signing policy](.github/signpath/CODE_SIGNING.md) · [Report an issue](https://github.com/Zoltak-Dev/ai-multi-instance/issues) · [MIT License](LICENSE)

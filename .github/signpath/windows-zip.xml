@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file path="ai-multi-instance-v${version}-windows.zip">
+    <pe-file path="ai-multi-instance.exe" product-name="AI Multi-Instance"
+             product-version="${version}" file-version="${version}"
+             company-name="Zoltak-Dev" original-filename="ai-multi-instance.exe">
+      <authenticode-sign />
+    </pe-file>
+    <pe-file path="launcher.exe" product-name="AI Multi-Instance"
+             product-version="${version}" file-version="${version}"
+             company-name="Zoltak-Dev" original-filename="launcher.exe">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

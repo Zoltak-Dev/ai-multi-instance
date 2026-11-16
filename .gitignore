@@ -6,7 +6,10 @@ dist/
 *.spec
 
 # Runtime / user state (never commit — machine-specific or sensitive)
+/data/
 state.json
+state.lock
+launch-count.db*
 usage_cache.json
 usage_cache.json.tmp
 ClaudeProfiles/

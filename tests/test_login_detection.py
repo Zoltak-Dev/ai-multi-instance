@@ -1,6 +1,7 @@
 """Regression tests for the snapshot sign-in detector."""
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from io import StringIO
@@ -31,7 +32,7 @@ class CookieStoreSignatureTests(unittest.TestCase):
             return True
 
         with (mock.patch.object(main.msvcrt, "kbhit", return_value=False),
-              mock.patch.object(main, "_config_has_oauth",
+              mock.patch.object(main.usage, "claude_oauth_saved",
                                 side_effect=oauth_appears_after_cookie_write),
               mock.patch.object(main.time, "sleep", return_value=None),
               mock.patch.object(main.sys, "stdout", new=StringIO())):
@@ -65,7 +66,7 @@ class CookieStoreSignatureTests(unittest.TestCase):
             return clock >= 3.0
 
         with (mock.patch.object(main.msvcrt, "kbhit", return_value=False),
-              mock.patch.object(main, "_config_has_oauth",
+              mock.patch.object(main.usage, "claude_oauth_saved",
                                 side_effect=oauth_appears_later),
               mock.patch.object(main.time, "monotonic", side_effect=monotonic),
               mock.patch.object(main.time, "sleep", side_effect=sleep),
@@ -92,6 +93,9 @@ class SlotResolutionTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        app = mock.patch.object(engine, "_current", engine.CLAUDE)
+        app.start()
+        self.addCleanup(app.stop)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.local = self.root / "Local"
@@ -175,6 +179,85 @@ class SlotResolutionTests(unittest.TestCase):
         self.assertFalse(engine.supports_login_snapshot(engine.CODEX))
         self.assertIsNone(engine.default_slot_dir(engine.CODEX))
         self.assertIsNone(engine.backup_dir(engine.CODEX))
+
+    def test_failed_process_scan_does_not_look_like_closed_claude(self) -> None:
+        with (mock.patch.object(engine.subprocess, "run", side_effect=subprocess.TimeoutExpired("powershell", 10)),
+              self.assertRaisesRegex(RuntimeError, "check which Claude instances")):
+            engine.default_slot_running()
+
+    def test_wait_for_claude_to_close_fails_if_process_stays_open(self) -> None:
+        with (mock.patch.object(engine, "default_slot_pids", return_value=[123]),
+              mock.patch.object(engine, "_kill_pids", return_value=0),
+              mock.patch.object(engine.time, "monotonic", side_effect=[0, 1]),
+              self.assertRaisesRegex(RuntimeError, "main Claude instance could not be closed")):
+            engine.close_default_slot(wait=1)
+
+    def test_failed_sign_in_cleanup_leaves_main_session_stashed(self) -> None:
+        live = self._make_live(self._relocated())
+        with (mock.patch.dict(engine.os.environ, self.env),
+              mock.patch.object(engine, "default_slot_running", return_value=False),
+              mock.patch.object(engine, "close_profile"),
+              mock.patch.object(engine, "PROFILES_DIR", self.root / "profiles"),
+              mock.patch.object(engine, "close_default_slot", side_effect=[0, RuntimeError("still open")]),
+              mock.patch.object(engine, "launch_default_slot", side_effect=lambda: self._make_live(live)),
+              mock.patch.object(main, "confirm", return_value=True),
+              mock.patch.object(main, "pause") as pause,
+              mock.patch.object(main, "_detect_login", return_value="cancelled"),
+              mock.patch.object(main.sys, "stdout", new=StringIO())):
+            main.login_flow("work")
+            backup = engine.backup_dir()
+            self.assertTrue(engine.has_orphan_backup())
+            self.assertIn(str(backup), pause.call_args.args[0])
+        self.assertTrue((backup / "Local State").exists())
+        self.assertTrue((live / "Local State").exists())
+
+    def test_sign_in_leaves_main_data_in_place_when_closure_fails(self) -> None:
+        live = self._make_live(self._relocated())
+        with (mock.patch.dict(engine.os.environ, self.env),
+              mock.patch.object(engine, "default_slot_running", return_value=True),
+              mock.patch.object(engine, "close_profile"),
+              mock.patch.object(engine, "PROFILES_DIR", self.root / "profiles"),
+              mock.patch.object(engine, "close_default_slot", side_effect=RuntimeError("still open")),
+              mock.patch.object(engine, "launch_default_slot") as launch,
+              mock.patch.object(main, "confirm", return_value=True),
+              mock.patch.object(main, "pause"),
+              mock.patch.object(main.sys, "stdout", new=StringIO())):
+            main.login_flow("work")
+            launch.assert_not_called()
+            self.assertFalse(engine.has_orphan_backup())
+        self.assertTrue((live / "Local State").exists())
+
+    def test_recovery_at_eof_preserves_backup_and_exits(self) -> None:
+        self._make_live(self._relocated())
+        with (mock.patch.dict(engine.os.environ, self.env),
+              mock.patch("builtins.input", side_effect=EOFError),
+              mock.patch.object(engine, "close_default_slot") as close,
+              mock.patch.object(main.sys, "stdout", new=StringIO())):
+            engine.stash_default_slot()
+            self.assertFalse(main._recover_interrupted())
+            close.assert_not_called()
+            self.assertTrue(engine.has_orphan_backup())
+
+    def test_active_snapshot_blocks_sign_in_and_recovery_until_released(self) -> None:
+        live = self._make_live(self._relocated())
+        with (mock.patch.dict(engine.os.environ, self.env),
+              mock.patch.object(engine, "PROFILES_DIR", self.root / "profiles"),
+              mock.patch("builtins.input", return_value="r") as recovery_choice,
+              mock.patch.object(engine, "close_default_slot") as close,
+              mock.patch.object(main, "confirm", return_value=True),
+              mock.patch.object(main, "pause") as pause,
+              mock.patch.object(main.sys, "stdout", new=StringIO())):
+            with engine.claude_snapshot_lock():
+                self.assertTrue(engine.stash_default_slot())
+                self.assertFalse(main._recover_interrupted())
+                self.assertFalse(main.login_flow("work"))
+                self.assertTrue(engine.has_orphan_backup())
+                close.assert_not_called()
+                recovery_choice.assert_not_called()
+                self.assertIn("another window", pause.call_args.args[0])
+            self.assertTrue(main._recover_interrupted())
+            self.assertFalse(engine.has_orphan_backup())
+        self.assertTrue((live / "Local State").is_file())
 
 
 if __name__ == "__main__":
