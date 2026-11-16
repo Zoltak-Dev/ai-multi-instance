@@ -11,10 +11,7 @@
   <a href="https://ko-fi.com/zoltrak"><img alt="Support me on Ko-fi" src="https://img.shields.io/badge/Support%20me-Ko--fi-FF5E5B?style=for-the-badge&amp;logo=kofi&amp;logoColor=white"></a>
 </p>
 
-<p align="center">
-  <a href="docs/demo.mp4"><img src="docs/demo-preview.webp" alt="Preview of AI Multi-Instance. Click to watch the full demo." width="800"></a><br>
-  <a href="docs/demo.mp4">▶ Watch the 1-minute demo</a>
-</p>
+https://github.com/user-attachments/assets/804136fd-5319-48d3-9147-71d330ed585b
 
 ## Install
 
