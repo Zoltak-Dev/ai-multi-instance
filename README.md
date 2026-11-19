@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zoltak-Dev/ai-multi-instance/archive/refs/heads/main.zip"><img alt="Download source ZIP" src="https://img.shields.io/badge/Download-Source%20ZIP-2EA44F?style=for-the-badge&amp;logo=github&amp;logoColor=white"></a>
+  <a href="https://github.com/Zoltak-Dev/ai-multi-instance/releases/download/v2.1.0/install-ai-multi-instance.bat"><img alt="Download Windows installer" src="https://img.shields.io/badge/Download-Windows%20BAT-2EA44F?style=for-the-badge&amp;logo=windows&amp;logoColor=white"></a>
   <a href="https://github.com/Zoltak-Dev/ai-multi-instance/releases"><img alt="Total release downloads" src="https://img.shields.io/github/downloads/Zoltak-Dev/ai-multi-instance/total?style=for-the-badge&amp;label=Release%20downloads&amp;color=3B82F6"></a>
   <a href="https://ko-fi.com/zoltrak"><img alt="Support me on Ko-fi" src="https://img.shields.io/badge/Support%20me-Ko--fi-FF5E5B?style=for-the-badge&amp;logo=kofi&amp;logoColor=white"></a>
 </p>
@@ -17,7 +17,13 @@ https://github.com/user-attachments/assets/804136fd-5319-48d3-9147-71d330ed585b
 
 **Windows 10 or 11** with at least one supported desktop app installed as a Windows app package. [Claude Desktop](https://claude.ai/download) · [ChatGPT desktop app with Codex](https://chatgpt.com/download/)
 
-**From source — recommended**
+**Windows installer**
+
+Download and double-click [install-ai-multi-instance.bat](https://github.com/Zoltak-Dev/ai-multi-instance/releases/download/v2.1.0/install-ai-multi-instance.bat). It uses WinGet to install Git and Python if needed, then downloads the current source into `ai-multi-instance` on your desktop. Open the **AI Multi-Instance** desktop shortcut to start. You can run setup again to check an existing installation.
+
+If WinGet is unavailable, install or update [App Installer](https://apps.microsoft.com/detail/9nblggh4nns1) and run setup again, or install from source manually.
+
+**Manual installation**
 
 Install Python 3.9+ and Git, then run these commands in a terminal. No extra Python packages are needed. [Python](https://www.python.org/downloads/windows/) · [Git](https://git-scm.com/install/windows)
 
@@ -27,11 +33,11 @@ cd ai-multi-instance
 python main.py
 ```
 
-You can also extract the source ZIP and run `python main.py` from its folder. Git is needed for automatic updates of a cloned installation.
+You can also extract the [source ZIP](https://github.com/Zoltak-Dev/ai-multi-instance/archive/refs/heads/main.zip) and run `python main.py` from its folder. Git is needed for automatic updates of a cloned installation.
 
 ## Use
 
-1. Run `python main.py`. Use `C` to switch between Claude and Codex.
+1. Open the **AI Multi-Instance** shortcut or run `python main.py`. Use `C` to switch between Claude and Codex.
 2. Press `7` and name your profile. Follow the sign-in prompt or press `2` later. The tool also tries to create a desktop shortcut for the profile.
 3. Select it with `↑` / `↓`, then press **`Enter` or `1`** to open it.
 

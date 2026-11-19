@@ -245,9 +245,10 @@ jobs:
           else
             source_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA"
             description=$(jq -er 'strings | select(length > 0)' <<< "$RELEASE_NOTES_JSON")
-            downloads="Download **Source code (zip)** under **Assets** and follow the [source installation instructions]($source_url/README.md#install)."
+            installer_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/v2.1.0/install-ai-multi-instance.bat"
+            downloads="Download [install-ai-multi-instance.bat]($installer_url) for Windows setup, or use **Source code (zip)** under **Assets** and follow the [manual installation instructions]($source_url/README.md#install)."
             if [[ "$SOURCE_ONLY" != true ]]; then
-              downloads="Download the signed Windows ZIP under **Assets** or follow the [source installation instructions]($source_url/README.md#install)."
+              downloads="$downloads"$'\n\n'"The signed Windows ZIP is also available under **Assets**."
             fi
             printf -v notes '%s\n\n%s\n\n%s\n\n%s' "$marker" "$description" "$downloads" \
               "[Code signing policy]($source_url/.github/signpath/CODE_SIGNING.md)"

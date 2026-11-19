@@ -1,1 +1,2 @@
 engine.py export-subst
+*.bat text eol=crlf

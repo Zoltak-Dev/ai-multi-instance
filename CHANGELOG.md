@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Add a Windows setup script that finds or installs Git and Python, then puts AI Multi-Instance on the desktop with a shortcut.
+
 ## v2.1.0 — Shared history and live usage
 
 <!-- source-only -->
